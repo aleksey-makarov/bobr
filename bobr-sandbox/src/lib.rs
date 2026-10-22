@@ -14,10 +14,10 @@ mod tools;
 
 use bobr_builder::{BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
-use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
 use bobr_sandbox_launcher::{
     CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
-    SandboxStepReport,
+    SandboxEvent,
 };
 use bobr_store::fs_tree::FsTree;
 use serde::{Deserialize, Serialize};
@@ -245,12 +245,12 @@ fn build_sandbox(
 
     let output = cx
         .runtime()
-        .run(&SandboxInstallFunction, runtime_input)
+        .run_with_events(&SandboxInstallFunction, runtime_input, |event| {
+            log_sandbox_event(cx, event);
+        })
         .map_err(|error| BuilderError::ExecutionFailed(format!("sandbox build failed: {error}")))?;
     match output {
         SandboxFunctionOutput::Completed(output) => {
-            write_build_report(cx, &output);
-
             // The runtime function produces its output artifact under
             // cx.temp_dir and guarantees it is host-owned; the builder stages
             // it verbatim.
@@ -260,6 +260,106 @@ fn build_sandbox(
             "sandbox build cancelled by signal".to_string(),
         )),
     }
+}
+
+fn log_sandbox_event(cx: &BuildContext, event: SandboxEvent) {
+    let (message, details) = match event {
+        SandboxEvent::StepStarted {
+            index,
+            total,
+            name,
+            run_as,
+        } => {
+            let details = sandbox_step_details(index, total, &name, run_as.as_str());
+            (format!("step {}/{}: {name}", index + 1, total), details)
+        }
+        SandboxEvent::StepFinished {
+            index,
+            total,
+            name,
+            run_as,
+            duration_ms,
+            stdout_path,
+            stderr_path,
+        } => {
+            let mut details = sandbox_step_details(index, total, &name, run_as.as_str());
+            details.insert("duration_ms".to_string(), Value::from(duration_ms));
+            details.insert(
+                "stdout_path".to_string(),
+                Value::String(stdout_path.display().to_string()),
+            );
+            details.insert(
+                "stderr_path".to_string(),
+                Value::String(stderr_path.display().to_string()),
+            );
+            (
+                format!(
+                    "finished step {}/{}: {name} ({duration_ms} ms)",
+                    index + 1,
+                    total
+                ),
+                details,
+            )
+        }
+        SandboxEvent::StepFailed {
+            index,
+            total,
+            name,
+            run_as,
+            duration_ms,
+            exit_code,
+            signal,
+            stdout_path,
+            stderr_path,
+        } => {
+            let mut details = sandbox_step_details(index, total, &name, run_as.as_str());
+            details.insert("duration_ms".to_string(), Value::from(duration_ms));
+            if let Some(exit_code) = exit_code {
+                details.insert("exit_code".to_string(), Value::from(exit_code));
+            }
+            if let Some(signal) = signal {
+                details.insert("signal".to_string(), Value::from(signal));
+            }
+            details.insert(
+                "stdout_path".to_string(),
+                Value::String(stdout_path.display().to_string()),
+            );
+            details.insert(
+                "stderr_path".to_string(),
+                Value::String(stderr_path.display().to_string()),
+            );
+            (
+                format!(
+                    "failed step {}/{}: {name} ({duration_ms} ms)",
+                    index + 1,
+                    total
+                ),
+                details,
+            )
+        }
+    };
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "sandbox-step",
+        message,
+        None,
+        None,
+        details,
+    );
+}
+
+fn sandbox_step_details(
+    index: usize,
+    total: usize,
+    name: &str,
+    run_as: &str,
+) -> Map<String, Value> {
+    let mut details = Map::new();
+    details.insert("step_index".to_string(), Value::from(index as u64));
+    details.insert("step_total".to_string(), Value::from(total as u64));
+    details.insert("step_name".to_string(), Value::String(name.to_string()));
+    details.insert("run_as".to_string(), Value::String(run_as.to_string()));
+    details
 }
 
 fn prepare_sandbox_input(
@@ -380,47 +480,6 @@ fn sanitize_log_name(name: &str) -> String {
             }
         })
         .collect()
-}
-
-/// Write a high-level sandbox result log into the build context.
-fn write_build_report(cx: &BuildContext, output: &SandboxOutput) {
-    let steps = output
-        .steps
-        .iter()
-        .map(|step| {
-            let mut object = Map::new();
-            object.insert("name".to_string(), Value::String(step.name.clone()));
-            object.insert("run_as".to_string(), Value::String(step.run_as.clone()));
-            object.insert("exit_code".to_string(), Value::from(step.exit_code));
-            object.insert(
-                "duration_ms".to_string(),
-                Value::from(step.duration_ms as u64),
-            );
-            object.insert(
-                "stdout_path".to_string(),
-                Value::String(step.stdout_path.display().to_string()),
-            );
-            object.insert(
-                "stderr_path".to_string(),
-                Value::String(step.stderr_path.display().to_string()),
-            );
-            Value::Object(object)
-        })
-        .collect::<Vec<_>>();
-    let report = serde_json::json!({
-        "steps": steps,
-    });
-    if let Ok(text) = serde_json::to_string_pretty(&report) {
-        let log_path = cx.write_raw_log("sandbox-result", &text);
-        cx.log_event_with_details(
-            BuildLogLevel::Info,
-            "sandbox-result",
-            format!("sandbox ran {} step(s)", output.steps.len()),
-            None,
-            log_path,
-            Map::new(),
-        );
-    }
 }
 
 #[derive(Debug)]
@@ -1042,13 +1101,12 @@ pub(crate) struct SandboxRuntimeStep {
 }
 
 /// Typed output of [`SandboxInstallFunction`]: the host path of the produced
-/// fs-tree manifest and a per-step execution report. The manifest lives in the
-/// input `tmp` and is guaranteed not to be owned by an in-namespace sub-uid.
+/// fs-tree manifest. The manifest lives in the input `tmp` and is guaranteed
+/// not to be owned by an in-namespace sub-uid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxOutput {
     output_path: PathBuf,
-    steps: Vec<SandboxStepReport>,
 }
 
 /// Result of a sandbox runtime call. Cancellation is a typed outcome so it can
@@ -1057,7 +1115,7 @@ pub struct SandboxOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxFunctionOutput {
-    /// The sandbox finished and produced a captured artifact and step reports.
+    /// The sandbox finished and produced a captured artifact.
     Completed(SandboxOutput),
     /// The run-wide cancellation channel closed before the sandbox finished.
     Cancelled,
@@ -1066,67 +1124,82 @@ pub enum SandboxFunctionOutput {
 impl RuntimeFunction for SandboxInstallFunction {
     type Input = SandboxInput;
     type Output = SandboxFunctionOutput;
-    type Event = NoRuntimeEvent;
+    type Event = SandboxEvent;
 
     fn name(&self) -> &'static str {
         "sandbox-install"
     }
 
     fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
-        if !input.rootfs.is_dir() {
-            return Err(RuntimeError::new(format!(
-                "SandboxInstall rootfs must be a directory: '{}'",
-                input.rootfs.display()
-            )));
+        self.call_with_events(input, &mut |_| Ok(()))
+    }
+
+    fn call_with_events(
+        &self,
+        input: Self::Input,
+        emit: &mut dyn FnMut(Self::Event) -> RuntimeResult<()>,
+    ) -> Result<Self::Output, RuntimeError> {
+        run_sandbox_function(input, emit)
+    }
+}
+
+fn run_sandbox_function(
+    input: SandboxInput,
+    emit: &mut dyn FnMut(SandboxEvent) -> RuntimeResult<()>,
+) -> Result<SandboxFunctionOutput, RuntimeError> {
+    if !input.rootfs.is_dir() {
+        return Err(RuntimeError::new(format!(
+            "SandboxInstall rootfs must be a directory: '{}'",
+            input.rootfs.display()
+        )));
+    }
+
+    let cancellation = lifecycle::CancellationReceiver::open(&input.cancellation.fifo)?;
+    if cancellation.is_cancelled()? {
+        return Ok(SandboxFunctionOutput::Cancelled);
+    }
+
+    // Create the working directories the function owns under `tmp`: the build
+    // workspace (mount scaffolding), and -- for the plain-object `Sandbox`
+    // path -- the `$out` staging dir bound writable inside the sandbox. The
+    // additive path captures the overlay upper instead and needs no `$out`.
+    let workspace = input.tmp.join(RUNTIME_DIR_NAME);
+    recreate_empty_dir_force(&workspace).map_err(|error| RuntimeError::new(error.to_string()))?;
+    let out_dir = if input.plain_object {
+        let out = input.tmp.join(OUTPUT_DIR_NAME);
+        if let Err(error) = recreate_empty_dir_force(&out) {
+            remove_dir_force(&workspace)
+                .map_err(|cleanup| RuntimeError::new(cleanup.to_string()))?;
+            return Err(RuntimeError::new(error.to_string()));
         }
+        Some(out)
+    } else {
+        None
+    };
 
-        let cancellation = lifecycle::CancellationReceiver::open(&input.cancellation.fifo)?;
-        if cancellation.is_cancelled()? {
-            return Ok(SandboxFunctionOutput::Cancelled);
+    let result =
+        run_sandbox_and_capture(&input, &workspace, out_dir.as_deref(), &cancellation, emit);
+
+    // Guarantee no in-namespace-owned files remain in `tmp`. The workspace
+    // (build tree) is always removed as ns-root. `$out` is the artifact on
+    // success (must stay) but may hold ns-owned files on failure, where the
+    // host user could not clear them -- so remove it only on failure.
+    let completed = matches!(result, Ok(SandboxRunOutcome::Completed(_)));
+    let out_cleanup = if !completed {
+        match &out_dir {
+            Some(out) => remove_dir_force(out),
+            None => Ok(()),
         }
+    } else {
+        Ok(())
+    };
+    let workspace_cleanup = remove_dir_force(&workspace);
+    out_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
+    workspace_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
 
-        // Create the working directories the function owns under `tmp`: the build
-        // workspace (mount scaffolding), and -- for the plain-object `Sandbox`
-        // path -- the `$out` staging dir bound writable inside the sandbox. The
-        // additive path captures the overlay upper instead and needs no `$out`.
-        let workspace = input.tmp.join(RUNTIME_DIR_NAME);
-        recreate_empty_dir_force(&workspace)
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        let out_dir = if input.plain_object {
-            let out = input.tmp.join(OUTPUT_DIR_NAME);
-            if let Err(error) = recreate_empty_dir_force(&out) {
-                remove_dir_force(&workspace)
-                    .map_err(|cleanup| RuntimeError::new(cleanup.to_string()))?;
-                return Err(RuntimeError::new(error.to_string()));
-            }
-            Some(out)
-        } else {
-            None
-        };
-
-        let result = run_sandbox_and_capture(&input, &workspace, out_dir.as_deref(), &cancellation);
-
-        // Guarantee no in-namespace-owned files remain in `tmp`. The workspace
-        // (build tree) is always removed as ns-root. `$out` is the artifact on
-        // success (must stay) but may hold ns-owned files on failure, where the
-        // host user could not clear them -- so remove it only on failure.
-        let completed = matches!(result, Ok(SandboxRunOutcome::Completed(_)));
-        let out_cleanup = if !completed {
-            match &out_dir {
-                Some(out) => remove_dir_force(out),
-                None => Ok(()),
-            }
-        } else {
-            Ok(())
-        };
-        let workspace_cleanup = remove_dir_force(&workspace);
-        out_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
-        workspace_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
-
-        match result? {
-            SandboxRunOutcome::Completed(output) => Ok(SandboxFunctionOutput::Completed(output)),
-            SandboxRunOutcome::Cancelled => Ok(SandboxFunctionOutput::Cancelled),
-        }
+    match result? {
+        SandboxRunOutcome::Completed(output) => Ok(SandboxFunctionOutput::Completed(output)),
+        SandboxRunOutcome::Cancelled => Ok(SandboxFunctionOutput::Cancelled),
     }
 }
 
@@ -1146,18 +1219,19 @@ fn run_sandbox_and_capture(
     workspace: &Path,
     out_dir: Option<&Path>,
     cancellation: &lifecycle::CancellationReceiver,
+    emit: &mut dyn FnMut(SandboxEvent) -> RuntimeResult<()>,
 ) -> Result<SandboxRunOutcome, RuntimeError> {
     let prepared = mounts::PreparedSandbox::create(input, workspace, out_dir)?;
-    let steps = match lifecycle::run_sandbox_launcher(
+    match lifecycle::run_sandbox_launcher(
         &input.launcher_path,
         &prepared.launcher_config,
-        &prepared.runtime_files.success_report,
         &prepared.runtime_files.failure_report,
         cancellation,
+        emit,
     )? {
-        lifecycle::LauncherOutcome::Completed(steps) => steps,
+        lifecycle::LauncherOutcome::Completed => {}
         lifecycle::LauncherOutcome::Cancelled => return Ok(SandboxRunOutcome::Cancelled),
-    };
+    }
     if cancellation.is_cancelled()? {
         return Ok(SandboxRunOutcome::Cancelled);
     }
@@ -1190,10 +1264,7 @@ fn run_sandbox_and_capture(
         output_path
     };
 
-    Ok(SandboxRunOutcome::Completed(SandboxOutput {
-        output_path,
-        steps,
-    }))
+    Ok(SandboxRunOutcome::Completed(SandboxOutput { output_path }))
 }
 
 /// Recursively chowns `path` to uid 0 / gid 0 (in-namespace root, which maps to

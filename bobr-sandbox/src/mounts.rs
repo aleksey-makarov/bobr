@@ -3,9 +3,9 @@ use bobr_runtime::runtime::RuntimeError;
 use bobr_sandbox_launcher::{
     CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT, CONTAINER_INPUTS_DIR,
     CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG,
-    CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, LAUNCHER_BINARY_NAME, RunnerConfig,
-    RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig,
-    SandboxLauncherMount, SandboxLauncherMountKind, SandboxRootOverlay, validate_launcher_config,
+    CONTAINER_RUNTIME_DIR, LAUNCHER_BINARY_NAME, RunnerConfig, RunnerRunAs, RunnerStepConfig,
+    SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig, SandboxLauncherMount,
+    SandboxLauncherMountKind, SandboxRootOverlay, validate_launcher_config,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -230,7 +230,6 @@ fn write_runner_config(
         protocol_version: SANDBOX_PROTOCOL_VERSION,
         prepare_paths: vec![PathBuf::from(CONTAINER_BUILD_DIR)],
         steps,
-        success_report: PathBuf::from(CONTAINER_SUCCESS_REPORT),
         failure_report: PathBuf::from(CONTAINER_FAILURE_REPORT),
     };
     serde_json::to_writer(File::create(&runtime_files.runner_config)?, &runner_config)
@@ -239,7 +238,6 @@ fn write_runner_config(
 
 pub(crate) struct SandboxRuntimeFiles {
     root: PathBuf,
-    pub(crate) success_report: PathBuf,
     pub(crate) failure_report: PathBuf,
     runner_config: PathBuf,
     step_logs: Vec<SandboxStepLogMounts>,
@@ -248,10 +246,8 @@ pub(crate) struct SandboxRuntimeFiles {
 impl SandboxRuntimeFiles {
     fn create(root: &Path, config: &SandboxInput) -> Result<Self, RuntimeError> {
         fs::create_dir_all(root)?;
-        let success_report = root.join("sandbox-success.json");
         let failure_report = root.join("sandbox-failure.json");
         let runner_config = root.join("runner-config.json");
-        File::create(&success_report)?;
         File::create(&failure_report)?;
         File::create(&runner_config)?;
         fs::create_dir_all(root.join("logs"))?;
@@ -268,7 +264,6 @@ impl SandboxRuntimeFiles {
         }
         Ok(Self {
             root: root.to_path_buf(),
-            success_report,
             failure_report,
             runner_config,
             step_logs,

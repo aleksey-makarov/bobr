@@ -1,30 +1,9 @@
 use bobr_runtime::runtime::RuntimeError;
-use bobr_sandbox_launcher::{
-    SandboxRunnerFailureReport, SandboxRunnerSuccessReport, SandboxStepReport,
-};
+use bobr_sandbox_launcher::SandboxRunnerFailureReport;
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
-
-pub(crate) fn read_sandbox_success_steps(
-    path: &Path,
-) -> Result<Vec<SandboxStepReport>, RuntimeError> {
-    let bytes = fs::read(path)?;
-    if bytes.is_empty() {
-        return Err(RuntimeError::new(format!(
-            "sandbox success report '{}' is empty",
-            path.display()
-        )));
-    }
-    let report = serde_json::from_slice::<SandboxRunnerSuccessReport>(&bytes).map_err(|error| {
-        RuntimeError::new(format!(
-            "failed to parse sandbox success report '{}': {error}",
-            path.display()
-        ))
-    })?;
-    Ok(report.steps)
-}
 
 pub(crate) fn read_sandbox_failure_report(path: &Path, fallback: String) -> RuntimeError {
     match fs::read(path) {
@@ -66,7 +45,6 @@ pub(crate) fn command_context(stderr: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tempfile::tempdir;
 
     #[test]
     fn sandbox_failure_report_message_includes_step_status_and_logs() {
@@ -87,28 +65,6 @@ mod tests {
         assert!(message.contains("duration_ms=123"));
         assert!(message.contains("stdout=/tmp/compile.stdout"));
         assert!(message.contains("stderr=/tmp/compile.stderr"));
-    }
-
-    #[test]
-    fn success_report_reads_only_steps() {
-        let temp = tempdir().unwrap();
-        let path = temp.path().join("success.json");
-        let report = SandboxRunnerSuccessReport {
-            steps: vec![SandboxStepReport {
-                name: "install".to_string(),
-                run_as: "build-user".to_string(),
-                exit_code: 0,
-                duration_ms: 7,
-                stdout_path: PathBuf::from("/tmp/install.stdout"),
-                stderr_path: PathBuf::from("/tmp/install.stderr"),
-            }],
-        };
-        fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
-
-        let steps = read_sandbox_success_steps(&path).unwrap();
-
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].name, "install");
     }
 
     #[test]

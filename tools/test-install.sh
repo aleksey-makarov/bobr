@@ -55,7 +55,7 @@ EOF
 cat >"${fixture_root}/bin/bobr-sandbox-launcher" <<'EOF'
 #!/bin/sh
 [ "${1:-}" = --protocol-info ] || exit 2
-echo '{"name":"bobr-sandbox-launcher","protocol_version":6}'
+echo '{"name":"bobr-sandbox-launcher","protocol_version":7}'
 EOF
 chmod 755 "${fixture_root}/bin/"*
 tar -C "${test_root}/fixture" -cJf "${fixture}/${archive_name}" \

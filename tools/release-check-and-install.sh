@@ -256,7 +256,7 @@ staged_build_info="$("${install_stage}/bobr" --build-info)"
 "${install_stage}/bobr-repo" --version >/dev/null
 "${install_stage}/bobr-fsobj-hash" --help >/dev/null
 [ "$("${install_stage}/bobr-sandbox-launcher" --protocol-info)" = \
-    '{"name":"bobr-sandbox-launcher","protocol_version":6}' ] \
+    '{"name":"bobr-sandbox-launcher","protocol_version":7}' ] \
   || die "staged sandbox launcher reports an unexpected protocol"
 
 for command in "${installed_commands[@]}"; do

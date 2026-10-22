@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -19,7 +19,10 @@ pub const LAUNCHER_BINARY_NAME: &str = "bobr-sandbox-launcher";
 /// The runtime writes `RunnerConfig` and `SandboxLauncherConfig` files with
 /// this version, and the launcher rejects configs with a different value.
 /// Version 6 removes the legacy output scan from the launcher.
-pub const SANDBOX_PROTOCOL_VERSION: u32 = 6;
+/// Version 7 replaces the success report with streamed step events.
+pub const SANDBOX_PROTOCOL_VERSION: u32 = 7;
+
+const MAX_EVENT_FRAME_LEN: usize = 64 * 1024;
 
 macro_rules! container_bobr_dir {
     () => {
@@ -51,8 +54,6 @@ pub const CONTAINER_LAUNCHER_DIR: &str = container_path!("launcher");
 pub const CONTAINER_RUNTIME_DIR: &str = container_path!("runtime");
 /// Container path of the runner config JSON file.
 pub const CONTAINER_RUNNER_CONFIG: &str = container_path!("runtime/runner-config.json");
-/// Container path of the success report JSON file.
-pub const CONTAINER_SUCCESS_REPORT: &str = container_path!("runtime/sandbox-success.json");
 /// Container path of the failure report JSON file.
 pub const CONTAINER_FAILURE_REPORT: &str = container_path!("runtime/sandbox-failure.json");
 
@@ -86,13 +87,9 @@ pub struct RunnerConfig {
     pub prepare_paths: Vec<PathBuf>,
     /// Ordered command steps to run.
     pub steps: Vec<RunnerStepConfig>,
-    /// Container path where the success report is written. The runner opens it
+    /// Container path where the failure report is written. The runner opens it
     /// after chroot; it is visible on the host because the runtime directory is
     /// bind-mounted (see [`CONTAINER_RUNTIME_DIR`]).
-    pub success_report: PathBuf,
-    /// Container path where the failure report is written. Same handoff as
-    /// `success_report`: opened by the runner after chroot, visible on the host
-    /// via the bind-mounted runtime directory.
     pub failure_report: PathBuf,
 }
 
@@ -323,7 +320,7 @@ pub struct RunnerStepConfig {
 }
 
 /// User identity used to execute one runner step.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunnerRunAs {
     /// Run as the sandbox build user, currently numeric `1:1`.
@@ -333,7 +330,8 @@ pub enum RunnerRunAs {
 }
 
 impl RunnerRunAs {
-    pub(crate) fn as_str(self) -> &'static str {
+    /// Stable spelling used in diagnostics and structured build events.
+    pub fn as_str(self) -> &'static str {
         match self {
             RunnerRunAs::BuildUser => "build-user",
             RunnerRunAs::Root => "root",
@@ -341,28 +339,129 @@ impl RunnerRunAs {
     }
 }
 
-/// Per-step execution report: how one sandbox step ran.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxStepReport {
-    /// Step name, from the recipe.
-    pub name: String,
-    /// User the step ran as (`build-user` or `root`).
-    pub run_as: String,
-    /// Process exit code.
-    pub exit_code: i32,
-    /// Wall-clock duration, in milliseconds.
-    pub duration_ms: u128,
-    /// Path to the captured stdout log.
-    pub stdout_path: PathBuf,
-    /// Path to the captured stderr log.
-    pub stderr_path: PathBuf,
+/// Intermediate event emitted while the sandbox runner executes build steps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SandboxEvent {
+    /// A step is about to be spawned.
+    StepStarted {
+        /// Zero-based index in the configured step list.
+        index: usize,
+        /// Number of configured steps.
+        total: usize,
+        /// Step name from the recipe.
+        name: String,
+        /// Identity used to execute the step.
+        run_as: RunnerRunAs,
+    },
+    /// A step process exited successfully.
+    StepFinished {
+        /// Zero-based index in the configured step list.
+        index: usize,
+        /// Number of configured steps.
+        total: usize,
+        /// Step name from the recipe.
+        name: String,
+        /// Identity used to execute the step.
+        run_as: RunnerRunAs,
+        /// Wall-clock duration in milliseconds.
+        duration_ms: u64,
+        /// Host-visible path to captured stdout.
+        stdout_path: PathBuf,
+        /// Host-visible path to captured stderr.
+        stderr_path: PathBuf,
+    },
+    /// A step could not be spawned, waited for, or exited unsuccessfully.
+    StepFailed {
+        /// Zero-based index in the configured step list.
+        index: usize,
+        /// Number of configured steps.
+        total: usize,
+        /// Step name from the recipe.
+        name: String,
+        /// Identity used to execute the step.
+        run_as: RunnerRunAs,
+        /// Wall-clock duration in milliseconds.
+        duration_ms: u64,
+        /// Exit code, when the process exited normally.
+        exit_code: Option<i32>,
+        /// Signal number, when the process was killed by a signal.
+        signal: Option<i32>,
+        /// Host-visible path to captured stdout.
+        stdout_path: PathBuf,
+        /// Host-visible path to captured stderr.
+        stderr_path: PathBuf,
+    },
 }
 
-/// Report written by the runner when every step succeeded.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SandboxRunnerSuccessReport {
-    /// Per-step reports, in execution order.
-    pub steps: Vec<SandboxStepReport>,
+/// Writes one length-prefixed JSON sandbox event and flushes it immediately.
+pub fn write_sandbox_event(writer: &mut impl Write, event: &SandboxEvent) -> io::Result<()> {
+    let payload = serde_json::to_vec(event).map_err(io::Error::other)?;
+    if payload.len() > MAX_EVENT_FRAME_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "sandbox event frame length {} exceeds limit {MAX_EVENT_FRAME_LEN}",
+                payload.len()
+            ),
+        ));
+    }
+    let length = u32::try_from(payload.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "sandbox event is too large"))?;
+    writer.write_all(&length.to_be_bytes())?;
+    writer.write_all(&payload)?;
+    writer.flush()
+}
+
+/// Incremental decoder for the runner's length-prefixed event stream.
+#[derive(Debug, Default)]
+pub struct SandboxEventDecoder {
+    bytes: Vec<u8>,
+}
+
+impl SandboxEventDecoder {
+    /// Adds bytes read from the event pipe.
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    /// Returns the next complete event, or `None` when more bytes are needed.
+    pub fn next_event(&mut self) -> io::Result<Option<SandboxEvent>> {
+        if self.bytes.len() < 4 {
+            return Ok(None);
+        }
+        let length = u32::from_be_bytes(self.bytes[..4].try_into().unwrap()) as usize;
+        if length > MAX_EVENT_FRAME_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("sandbox event frame length {length} exceeds limit {MAX_EVENT_FRAME_LEN}"),
+            ));
+        }
+        let frame_len = 4 + length;
+        if self.bytes.len() < frame_len {
+            return Ok(None);
+        }
+        let event = serde_json::from_slice(&self.bytes[4..frame_len]).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid sandbox event: {error}"),
+            )
+        })?;
+        self.bytes.drain(..frame_len);
+        Ok(Some(event))
+    }
+
+    /// Verifies that EOF did not split a frame.
+    pub fn finish(&self) -> io::Result<()> {
+        if self.bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "sandbox event pipe closed with a partial frame",
+            ))
+        }
+    }
 }
 
 /// Report describing why the sandbox run failed. The fields beyond
@@ -378,7 +477,7 @@ pub struct SandboxRunnerFailureReport {
     /// Terminating signal, if the step was killed by one.
     pub signal: Option<i32>,
     /// Wall-clock duration of the failed step, in milliseconds.
-    pub duration_ms: Option<u128>,
+    pub duration_ms: Option<u64>,
     /// Path to the captured stdout log, if any.
     pub stdout_path: Option<PathBuf>,
     /// Path to the captured stderr log, if any.
@@ -537,5 +636,57 @@ mod tests {
 
         assert_eq!(info.name, LAUNCHER_BINARY_NAME);
         assert_eq!(info.protocol_version, SANDBOX_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn sandbox_event_decoder_accepts_partial_and_multiple_frames() {
+        let first = SandboxEvent::StepStarted {
+            index: 0,
+            total: 2,
+            name: "configure".to_string(),
+            run_as: RunnerRunAs::BuildUser,
+        };
+        let second = SandboxEvent::StepFinished {
+            index: 0,
+            total: 2,
+            name: "configure".to_string(),
+            run_as: RunnerRunAs::BuildUser,
+            duration_ms: 17,
+            stdout_path: PathBuf::from("/logs/stdout"),
+            stderr_path: PathBuf::from("/logs/stderr"),
+        };
+        let mut bytes = Vec::new();
+        write_sandbox_event(&mut bytes, &first).unwrap();
+        write_sandbox_event(&mut bytes, &second).unwrap();
+
+        let mut decoder = SandboxEventDecoder::default();
+        for byte in &bytes[..bytes.len() - 1] {
+            decoder.push(std::slice::from_ref(byte));
+        }
+        assert_eq!(decoder.next_event().unwrap(), Some(first));
+        assert_eq!(decoder.next_event().unwrap(), None);
+
+        decoder.push(&bytes[bytes.len() - 1..]);
+        assert_eq!(decoder.next_event().unwrap(), Some(second));
+        assert_eq!(decoder.next_event().unwrap(), None);
+        decoder.finish().unwrap();
+    }
+
+    #[test]
+    fn sandbox_event_decoder_rejects_partial_and_oversized_frames() {
+        let mut partial = SandboxEventDecoder::default();
+        partial.push(&[0, 0, 0, 5, b'{']);
+        assert_eq!(partial.next_event().unwrap(), None);
+        assert_eq!(
+            partial.finish().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+
+        let mut oversized = SandboxEventDecoder::default();
+        oversized.push(&((MAX_EVENT_FRAME_LEN as u32) + 1).to_be_bytes());
+        assert_eq!(
+            oversized.next_event().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

@@ -1,8 +1,6 @@
-use crate::reports::{
-    command_context, read_sandbox_failure_report, read_sandbox_success_steps, status_message,
-};
-use bobr_runtime::runtime::RuntimeError;
-use bobr_sandbox_launcher::{SandboxStepReport, write_handshake_byte};
+use crate::reports::{command_context, read_sandbox_failure_report, status_message};
+use bobr_runtime::runtime::{RuntimeError, RuntimeResult};
+use bobr_sandbox_launcher::{SandboxEvent, SandboxEventDecoder, write_handshake_byte};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -12,11 +10,13 @@ use std::path::Path;
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 
 const LAUNCHER_WAIT_FD: RawFd = 3;
+const LAUNCHER_EVENT_FD: RawFd = 4;
+const FIRST_TEMPORARY_FD: RawFd = 5;
 const PROCESS_POLL_INTERVAL_MS: i32 = 100;
 
 #[derive(Debug)]
 pub(crate) enum LauncherOutcome {
-    Completed(Vec<SandboxStepReport>),
+    Completed,
     Cancelled,
 }
 
@@ -73,9 +73,9 @@ impl CancellationReceiver {
 pub(crate) fn run_sandbox_launcher(
     launcher_path: &Path,
     launcher_config: &Path,
-    success_report: &Path,
     failure_report: &Path,
     cancellation: &CancellationReceiver,
+    emit: &mut dyn FnMut(SandboxEvent) -> RuntimeResult<()>,
 ) -> Result<LauncherOutcome, RuntimeError> {
     if cancellation.is_cancelled()? {
         return Ok(LauncherOutcome::Cancelled);
@@ -89,13 +89,31 @@ pub(crate) fn run_sandbox_launcher(
         read: wait_read,
         write: wait_write,
     } = wait_pipe;
-    let wait_read_fd = wait_read.as_raw_fd();
+    let event_pipe = Pipe::new().map_err(|error| {
+        RuntimeError::new(format!("failed to create sandbox event pipe: {error}"))
+    })?;
+    let Pipe {
+        read: event_read,
+        write: event_write,
+    } = event_pipe;
+    let inherited_wait =
+        duplicate_cloexec(wait_read.as_raw_fd(), FIRST_TEMPORARY_FD).map_err(|error| {
+            RuntimeError::new(format!("failed to duplicate launcher wait fd: {error}"))
+        })?;
+    let inherited_event =
+        duplicate_cloexec(event_write.as_raw_fd(), FIRST_TEMPORARY_FD).map_err(|error| {
+            RuntimeError::new(format!("failed to duplicate launcher event fd: {error}"))
+        })?;
+    let inherited_wait_fd = inherited_wait.as_raw_fd();
+    let inherited_event_fd = inherited_event.as_raw_fd();
     let expected_parent = unsafe { libc::getpid() };
     let mut command = Command::new(launcher_path);
     command
         .arg("launch")
         .arg("--wait-fd")
         .arg(LAUNCHER_WAIT_FD.to_string())
+        .arg("--event-fd")
+        .arg(LAUNCHER_EVENT_FD.to_string())
         .arg("--config")
         .arg(launcher_config)
         // Keep terminal signals in the Bobr process group. This matters for
@@ -113,7 +131,8 @@ pub(crate) fn run_sandbox_launcher(
     // handshake; all other transport state stays in the parent.
     unsafe {
         command.pre_exec(move || {
-            prepare_launcher_wait_fd(wait_read_fd)?;
+            duplicate_launcher_fd(inherited_wait_fd, LAUNCHER_WAIT_FD)?;
+            duplicate_launcher_fd(inherited_event_fd, LAUNCHER_EVENT_FD)?;
             set_parent_death_signal(expected_parent)
         });
     }
@@ -125,6 +144,9 @@ pub(crate) fn run_sandbox_launcher(
         ))
     })?);
     drop(wait_read);
+    drop(event_write);
+    drop(inherited_wait);
+    drop(inherited_event);
 
     if cancellation.is_cancelled()? {
         let _ = terminate_child(&mut child);
@@ -153,10 +175,18 @@ pub(crate) fn run_sandbox_launcher(
         ))
     })?;
     let mut stderr_bytes = Vec::new();
+    let mut event_reader = File::from(event_read);
+    set_nonblocking(event_reader.as_raw_fd()).map_err(|error| {
+        RuntimeError::new(format!(
+            "failed to make sandbox event pipe nonblocking: {error}"
+        ))
+    })?;
+    let mut event_decoder = SandboxEventDecoder::default();
     let status = loop {
         drain_stderr(&mut stderr, &mut stderr_bytes).map_err(|error| {
             RuntimeError::new(format!("failed to read sandbox launcher stderr: {error}"))
         })?;
+        drain_sandbox_events(&mut event_reader, &mut event_decoder, emit)?;
         if let Some(status) = child.try_wait().map_err(|error| {
             RuntimeError::new(format!(
                 "failed to wait for sandbox launcher '{}': {error}",
@@ -165,20 +195,35 @@ pub(crate) fn run_sandbox_launcher(
         })? {
             break status;
         }
-        if poll_launcher(cancellation.fifo.as_raw_fd(), stderr.as_raw_fd()).map_err(|error| {
+        if poll_launcher(
+            cancellation.fifo.as_raw_fd(),
+            stderr.as_raw_fd(),
+            event_reader.as_raw_fd(),
+        )
+        .map_err(|error| {
             RuntimeError::new(format!(
                 "failed while waiting for sandbox launcher: {error}"
             ))
         })? {
             let _ = child.kill_and_reap();
             let _ = drain_stderr(&mut stderr, &mut stderr_bytes);
+            let _ = drain_sandbox_events(&mut event_reader, &mut event_decoder, emit);
             return Ok(LauncherOutcome::Cancelled);
         }
     };
     let _ = drain_stderr(&mut stderr, &mut stderr_bytes);
+    let event_eof = drain_sandbox_events(&mut event_reader, &mut event_decoder, emit)?;
+    if !event_eof {
+        return Err(RuntimeError::new(
+            "sandbox event pipe remained open after launcher exit",
+        ));
+    }
+    event_decoder
+        .finish()
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
 
     if status.success() {
-        read_sandbox_success_steps(success_report).map(LauncherOutcome::Completed)
+        Ok(LauncherOutcome::Completed)
     } else {
         Err(read_sandbox_failure_report(
             failure_report,
@@ -271,6 +316,31 @@ fn drain_stderr(stderr: &mut ChildStderr, bytes: &mut Vec<u8>) -> io::Result<()>
     }
 }
 
+fn drain_sandbox_events(
+    reader: &mut File,
+    decoder: &mut SandboxEventDecoder,
+    emit: &mut dyn FnMut(SandboxEvent) -> RuntimeResult<()>,
+) -> RuntimeResult<bool> {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(count) => {
+                decoder.push(&buffer[..count]);
+                while let Some(event) = decoder
+                    .next_event()
+                    .map_err(|error| RuntimeError::new(error.to_string()))?
+                {
+                    emit(event)?;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(RuntimeError::new(error.to_string())),
+        }
+    }
+}
+
 fn cancellation_eof(fd: RawFd) -> io::Result<bool> {
     let mut byte = 0_u8;
     let result = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
@@ -293,7 +363,7 @@ fn cancellation_eof(fd: RawFd) -> io::Result<bool> {
     }
 }
 
-fn poll_launcher(cancellation_fd: RawFd, stderr_fd: RawFd) -> io::Result<bool> {
+fn poll_launcher(cancellation_fd: RawFd, stderr_fd: RawFd, event_fd: RawFd) -> io::Result<bool> {
     let mut pollfds = [
         libc::pollfd {
             fd: cancellation_fd,
@@ -302,6 +372,11 @@ fn poll_launcher(cancellation_fd: RawFd, stderr_fd: RawFd) -> io::Result<bool> {
         },
         libc::pollfd {
             fd: stderr_fd,
+            events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: event_fd,
             events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
             revents: 0,
         },
@@ -323,11 +398,16 @@ fn poll_launcher(cancellation_fd: RawFd, stderr_fd: RawFd) -> io::Result<bool> {
     Ok(pollfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0)
 }
 
-fn prepare_launcher_wait_fd(fd: RawFd) -> io::Result<()> {
-    duplicate_launcher_wait_fd(fd, LAUNCHER_WAIT_FD)
+fn duplicate_cloexec(fd: RawFd, minimum: RawFd) -> io::Result<OwnedFd> {
+    let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, minimum) };
+    if duplicated < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+    }
 }
 
-fn duplicate_launcher_wait_fd(fd: RawFd, target_fd: RawFd) -> io::Result<()> {
+fn duplicate_launcher_fd(fd: RawFd, target_fd: RawFd) -> io::Result<()> {
     if fd == target_fd {
         clear_cloexec(fd)
     } else if unsafe { libc::dup2(fd, target_fd) } < 0 {
@@ -421,23 +501,23 @@ mod tests {
     }
 
     #[test]
-    fn prepare_launcher_wait_fd_duplicates_without_cloexec() {
+    fn launcher_fd_is_duplicated_without_cloexec() {
         let source = Pipe::new().unwrap();
         let target = Pipe::new().unwrap();
         let target_fd = target.write.as_raw_fd();
 
-        duplicate_launcher_wait_fd(source.read.as_raw_fd(), target_fd).unwrap();
+        duplicate_launcher_fd(source.read.as_raw_fd(), target_fd).unwrap();
 
         assert!(!cloexec_is_set(target_fd));
     }
 
     #[test]
-    fn prepare_launcher_wait_fd_clears_cloexec_when_fd_already_matches() {
+    fn launcher_fd_clears_cloexec_when_already_at_target() {
         let pipe = Pipe::new().unwrap();
         let fd = pipe.read.as_raw_fd();
         assert!(cloexec_is_set(fd));
 
-        duplicate_launcher_wait_fd(fd, fd).unwrap();
+        duplicate_launcher_fd(fd, fd).unwrap();
 
         assert!(!cloexec_is_set(fd));
     }
@@ -497,7 +577,7 @@ mod tests {
         let launcher = temp.path().join("launcher.sh");
         write_script(
             &launcher,
-            "dd bs=1 count=1 <&3 >/dev/null 2>/dev/null\nprintf '%s' \"$$\" > \"$5/pid\"\nprintf x > \"$5/ready\"\nexec sleep 60",
+            "dd bs=1 count=1 <&3 >/dev/null 2>/dev/null\nprintf '%s' \"$$\" > \"$7/pid\"\nprintf x > \"$7/ready\"\nexec sleep 60",
         );
         let launcher_config = temp.path().join("config");
         std::fs::create_dir(&launcher_config).unwrap();
@@ -512,19 +592,18 @@ mod tests {
         let thread_token = token.clone();
         let launcher = Arc::new(launcher);
         let thread_launcher = launcher.clone();
-        let success = temp.path().join("success.json");
         let failure = temp.path().join("failure.json");
-        let thread_success = success.clone();
         let thread_failure = failure.clone();
         let thread_launcher_config = launcher_config.clone();
         let thread = thread::spawn(move || {
             let receiver = CancellationReceiver::open(thread_token.fifo_path()).unwrap();
+            let mut emit = |_| Ok(());
             run_sandbox_launcher(
                 &thread_launcher,
                 &thread_launcher_config,
-                &thread_success,
                 &thread_failure,
                 &receiver,
+                &mut emit,
             )
             .unwrap()
         });
@@ -551,16 +630,56 @@ mod tests {
         );
         let token = CancellationToken::new().unwrap();
         let receiver = CancellationReceiver::open(token.fifo_path()).unwrap();
+        let mut emit = |_| Ok(());
         let error = run_sandbox_launcher(
             &launcher,
             &temp.path().join("config"),
-            &temp.path().join("success.json"),
             &temp.path().join("failure.json"),
             &receiver,
+            &mut emit,
         )
         .unwrap_err();
 
         assert!(error.to_string().contains("sandbox launcher exited"));
+    }
+
+    #[test]
+    fn launcher_wait_delivers_last_event_before_success() {
+        let temp = tempdir().unwrap();
+        let launcher = temp.path().join("launcher.sh");
+        write_script(
+            &launcher,
+            "dd bs=1 count=1 <&3 >/dev/null 2>/dev/null\ncat \"$7/events.bin\" >&4",
+        );
+        let launcher_config = temp.path().join("config");
+        std::fs::create_dir(&launcher_config).unwrap();
+        let expected = SandboxEvent::StepStarted {
+            index: 1,
+            total: 3,
+            name: "build".to_string(),
+            run_as: bobr_sandbox_launcher::RunnerRunAs::BuildUser,
+        };
+        let mut frame = Vec::new();
+        bobr_sandbox_launcher::write_sandbox_event(&mut frame, &expected).unwrap();
+        std::fs::write(launcher_config.join("events.bin"), frame).unwrap();
+        let token = CancellationToken::new().unwrap();
+        let receiver = CancellationReceiver::open(token.fifo_path()).unwrap();
+        let mut events = Vec::new();
+
+        let outcome = run_sandbox_launcher(
+            &launcher,
+            &launcher_config,
+            &temp.path().join("failure.json"),
+            &receiver,
+            &mut |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, LauncherOutcome::Completed));
+        assert_eq!(events, vec![expected]);
     }
 
     #[test]

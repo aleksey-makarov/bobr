@@ -204,7 +204,6 @@ published out of it by renaming and hardlinking. Their contents are:
   index.jsonl
   <00000000>-<tag>[-<name>]/
     meta.json
-    events.jsonl
     raw/
 <work>/
   <00000000>-<tag>[-<name>]/
@@ -325,7 +324,8 @@ Each run writes:
 
 - one run-level structured event log under `<logs>/events.jsonl`
 - one workspace index under `<logs>/index.jsonl`
-- per-subject logs under `<logs>/<00000000>-<tag>[-<name>]/`
+- per-subject metadata and raw logs under
+  `<logs>/<00000000>-<tag>[-<name>]/`
 
 When the standard `bobr-recipes/bin/bobr-build.sh` driver starts the run, it
 also writes two inspection sidecars at the run-log root:
@@ -353,10 +353,8 @@ stored in that subject's
 object hash. Repository metadata and content transfers use their own activity
 identifiers, not necessarily build keys.
 
-The run-level event log is the full audit log of the run. Subjects with dedicated
-logs also write their events to their own `events.jsonl`; events without a bound
-subject workspace, including repository transfers, appear only in the run-level
-log. Raw logs created by builders are written under the subject's `raw/`
-directory. The event record format, the closed `status` vocabulary, and the
-format guarantees are specified
-in [Build logging](LOGGING.md).
+The run-level event log is the full audit log of the run, including events from
+subjects with dedicated workspaces and repository transfers without one. Raw
+logs created by builders are written under the subject's `raw/` directory. The
+event record format, the closed `status` vocabulary, and the format guarantees
+are specified in [Build logging](LOGGING.md).

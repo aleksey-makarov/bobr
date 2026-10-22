@@ -203,7 +203,7 @@ expected_version="bobr ${version} (request bobr-request-v6) (${git_commit})"
 launcher_protocol="$("${staged_bin}/bobr-sandbox-launcher" --protocol-info)" \
   || die "staged sandbox launcher failed to report its protocol"
 [ "${launcher_protocol}" = \
-    '{"name":"bobr-sandbox-launcher","protocol_version":6}' ] \
+    '{"name":"bobr-sandbox-launcher","protocol_version":7}' ] \
   || die "staged sandbox launcher reports an unexpected protocol"
 
 # Nothing above this point changes the destination. Stage all four files on

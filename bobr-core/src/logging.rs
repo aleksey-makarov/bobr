@@ -221,7 +221,7 @@ pub trait BuildLogger: fmt::Debug + Send + Sync {
     fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String>;
 }
 
-/// A [`BuildLogger`] that discards everything. Used where no per-subject log
+/// A [`BuildLogger`] that discards everything. Used where no subject workspace
 /// exists (e.g. cache hits).
 #[derive(Debug, Default)]
 pub struct NoopBuildLogger;
@@ -243,19 +243,6 @@ impl BuildLogger for NoopBuildLogger {
 pub trait EventSink: fmt::Debug + Send + Sync {
     /// Consumes one fully assembled, envelope-stamped record.
     fn write_event(&self, record: &EventLogRecord);
-
-    /// Notifies the sink that a subject has been bound, before any of its
-    /// events arrive. Sinks that keep per-subject state (file writers) set it
-    /// up here; the default is a no-op.
-    fn register_subject(&self, _subject: &BuildLogSubject) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// Notifies the sink that a subject is done and no further events for it
-    /// will arrive, so any per-subject state can be released. Called when the
-    /// subject's logger is dropped, which covers success, failure and
-    /// cancellation alike. The default is a no-op.
-    fn release_subject(&self, _identity: &SubjectIdentity) {}
 
     /// Flushes any buffered output to the OS. Default no-op for sinks that do
     /// not buffer.
@@ -555,32 +542,15 @@ impl BuildRunLogger {
         self.sinks.iter().map(|sink| sink.error_count()).sum()
     }
 
-    /// Binds a subject to this run: registers it with every sink and returns a
-    /// per-subject [`BuildLogger`] that stamps the subject's identity on its
-    /// events.
-    pub fn bind_subject(
-        self: &Arc<Self>,
-        subject: BuildLogSubject,
-    ) -> Result<Arc<dyn BuildLogger>, String> {
-        for sink in &self.sinks {
-            sink.register_subject(&subject)?;
-        }
-        Ok(Arc::new(BoundBuildLogger {
+    /// Returns a per-subject [`BuildLogger`] that stamps the subject's identity
+    /// on its events.
+    pub fn bind_subject(self: &Arc<Self>, subject: BuildLogSubject) -> Arc<dyn BuildLogger> {
+        Arc::new(BoundBuildLogger {
             inner: self.clone(),
             subject,
             subject_seq: AtomicU64::new(0),
             raw_log_counters: Mutex::new(BTreeMap::new()),
-        }))
-    }
-
-    /// Releases every sink's state for a finished subject. Called from
-    /// `BoundBuildLogger::drop`: the bound logger is the only handle through
-    /// which subject events can be emitted, so once it is gone no further event
-    /// can reach that subject's state.
-    fn release_subject(&self, identity: &SubjectIdentity) {
-        for sink in &self.sinks {
-            sink.release_subject(identity);
-        }
+        })
     }
 
     /// Logs a run-level event that belongs to no single subject (build start,
@@ -589,9 +559,9 @@ impl BuildRunLogger {
         self.emit(None, None, &event);
     }
 
-    /// Logs an event carrying a subject's identity but bound to no per-subject
-    /// log. Used for cache hits, which have identity but no workspace: the
-    /// record lands in the run-level log only (no subject writer is registered).
+    /// Logs an event carrying a subject's identity but bound to no subject
+    /// workspace. Used for cache hits, which have identity but no raw-log
+    /// directory.
     pub fn log_subject_event(&self, identity: &SubjectIdentity, event: BuildLogEvent) {
         self.emit(Some(identity), None, &event);
     }
@@ -643,26 +613,23 @@ impl SubjectIdentity {
     }
 }
 
-/// Subject identity plus the log directories allocated for a concrete run.
+/// Subject identity plus the raw-log directory allocated for a concrete run.
 #[derive(Debug, Clone)]
 pub struct BuildLogSubject {
     identity: SubjectIdentity,
-    log_dir: PathBuf,
     raw_log_dir: PathBuf,
 }
 
 impl BuildLogSubject {
-    /// Creates a log subject from runtime-allocated identity and log paths.
+    /// Creates a log subject from runtime-allocated identity and raw-log path.
     pub fn new(
         tag: impl Into<String>,
         name: impl Into<String>,
         build_key: impl Into<String>,
-        log_dir: PathBuf,
         raw_log_dir: PathBuf,
     ) -> Self {
         Self {
             identity: SubjectIdentity::new(tag, name, build_key),
-            log_dir,
             raw_log_dir,
         }
     }
@@ -711,74 +678,12 @@ impl BuildLogger for BoundBuildLogger {
     }
 }
 
-/// Releasing on drop rather than on a "subject finished" event is deliberate:
-/// the executor drops this logger on every path out of a subject -- success,
-/// builder failure, cancellation, panic -- so no path can leak the subject's
-/// open log file. A run builds far more subjects than it runs concurrently, so
-/// holding a file per *finished* subject would exhaust the process's descriptor
-/// limit part-way through a large build.
-impl Drop for BoundBuildLogger {
-    fn drop(&mut self) {
-        self.inner.release_subject(self.subject.identity());
-    }
-}
-
-/// File sink: persists records to the run-level and per-subject `events.jsonl`.
-///
-/// Owns the run-level writer plus a writer per *live* subject (keyed by the
-/// full build key). A subject event is written to both the run log and that
-/// subject's log; the serialized line is identical in both, so tooling can
-/// match records byte-for-byte.
-///
-/// A subject's writer is created by `register_subject` and closed again by
-/// `release_subject`, so the number of open files tracks how many subjects are
-/// running at once, not how many the run has built.
+/// File sink: persists records to the run-level `events.jsonl`.
 #[derive(Debug)]
 struct FileSink {
     run_event_log_path: PathBuf,
     run_writer: Mutex<BufWriter<File>>,
-    subject_writers: Mutex<HashMap<String, SubjectWriter>>,
     errors: AtomicU64,
-}
-
-#[derive(Debug)]
-struct SubjectWriter {
-    event_log_path: PathBuf,
-    /// Lines waiting to reach the file. The file itself is never held open:
-    /// a build binds at most `jobs` subjects at a time, but the fetcher binds
-    /// every source of its request at once, and one descriptor per bound
-    /// subject was enough to exhaust the process limit mid-run.
-    buffered: Vec<u8>,
-}
-
-impl SubjectWriter {
-    fn append(&mut self, line: &str) {
-        self.buffered.extend_from_slice(line.as_bytes());
-        self.buffered.push(b'\n');
-    }
-
-    /// Opens the file, appends everything buffered, and closes it again.
-    fn flush(&mut self, sync: bool) -> Result<(), String> {
-        if self.buffered.is_empty() {
-            return Ok(());
-        }
-        let describe = |error: std::io::Error| {
-            format!(
-                "failed to append event log '{}': {error}",
-                self.event_log_path.display()
-            )
-        };
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(&self.event_log_path)
-            .map_err(describe)?;
-        file.write_all(&self.buffered).map_err(describe)?;
-        if sync {
-            file.sync_data().map_err(describe)?;
-        }
-        self.buffered.clear();
-        Ok(())
-    }
 }
 
 impl FileSink {
@@ -793,7 +698,6 @@ impl FileSink {
         Ok(Self {
             run_event_log_path,
             run_writer: Mutex::new(BufWriter::new(file)),
-            subject_writers: Mutex::new(HashMap::new()),
             errors: AtomicU64::new(0),
         })
     }
@@ -864,21 +768,6 @@ impl EventSink for FileSink {
             }
             Err(error) => self.note_error(error.to_string()),
         }
-
-        let Some(subject) = &record.subject else {
-            return;
-        };
-        match self.subject_writers.lock() {
-            Ok(mut writers) => {
-                if let Some(subject_writer) = writers.get_mut(&subject.build_key) {
-                    subject_writer.append(&line);
-                    if flush_now && let Err(error) = subject_writer.flush(false) {
-                        self.note_error(error);
-                    }
-                }
-            }
-            Err(error) => self.note_error(error.to_string()),
-        }
     }
 
     fn flush(&self) {
@@ -887,73 +776,10 @@ impl EventSink for FileSink {
         {
             self.note_error(error);
         }
-        if let Ok(mut writers) = self.subject_writers.lock() {
-            for subject_writer in writers.values_mut() {
-                if let Err(error) = subject_writer.flush(false) {
-                    self.note_error(error);
-                }
-            }
-        }
     }
 
     fn error_count(&self) -> u64 {
         self.errors.load(Ordering::Relaxed)
-    }
-
-    fn register_subject(&self, subject: &BuildLogSubject) -> Result<(), String> {
-        fs::create_dir_all(&subject.log_dir).map_err(|error| {
-            format!(
-                "failed to create subject log directory '{}': {error}",
-                subject.log_dir.display()
-            )
-        })?;
-        fs::create_dir_all(&subject.raw_log_dir).map_err(|error| {
-            format!(
-                "failed to create raw log directory '{}': {error}",
-                subject.raw_log_dir.display()
-            )
-        })?;
-        let event_log_path = subject.log_dir.join("events.jsonl");
-        // Created (and truncated) here to claim the path, then closed at once:
-        // appends reopen it. See SubjectWriter for why no handle is kept.
-        create_event_log_file(&event_log_path).map_err(|error| {
-            format!(
-                "failed to create subject event log '{}': {error}",
-                event_log_path.display()
-            )
-        })?;
-        let mut writers = self
-            .subject_writers
-            .lock()
-            .map_err(|error| error.to_string())?;
-        writers.insert(
-            subject.identity.build_key.clone(),
-            SubjectWriter {
-                event_log_path,
-                buffered: Vec::new(),
-            },
-        );
-        Ok(())
-    }
-
-    /// Closes the subject's `events.jsonl`, flushing what is still buffered.
-    ///
-    /// Flushing explicitly rather than leaving it to `BufWriter::drop` is what
-    /// makes a lost tail visible: drop swallows the error, this counts it.
-    fn release_subject(&self, identity: &SubjectIdentity) {
-        let removed = match self.subject_writers.lock() {
-            Ok(mut writers) => writers.remove(&identity.build_key),
-            Err(error) => {
-                self.note_error(error.to_string());
-                return;
-            }
-        };
-        let Some(mut subject_writer) = removed else {
-            return;
-        };
-        if let Err(error) = subject_writer.flush(false) {
-            self.note_error(error);
-        }
     }
 }
 
@@ -2491,18 +2317,6 @@ mod tests {
         fs::read_to_string(run_log_dir.join("events.jsonl")).unwrap()
     }
 
-    /// Helper: a log subject with a build key derived from `index`.
-    fn test_subject(run_log_dir: &Path, index: usize) -> BuildLogSubject {
-        let subject_dir = run_log_dir.join(format!("{index:08}-Sandbox-node"));
-        BuildLogSubject::new(
-            "Sandbox",
-            "node",
-            format!("{index:064}"),
-            subject_dir.clone(),
-            subject_dir.join("raw"),
-        )
-    }
-
     fn info_event(message: &str) -> BuildLogEvent {
         BuildLogEvent {
             level: BuildLogLevel::Info,
@@ -2513,81 +2327,6 @@ mod tests {
             raw_log_path: None,
             details: Map::new(),
         }
-    }
-
-    #[test]
-    fn releasing_a_subject_closes_its_log_file() {
-        // The leak this guards against: one open events.jsonl per subject, held
-        // for the whole run, exhausting the process descriptor limit part-way
-        // through a large build. Only live subjects may hold a writer.
-        let temp = tempdir().unwrap();
-        let run_log_dir = temp.path().join("logs").join("260603123456");
-        fs::create_dir_all(&run_log_dir).unwrap();
-        let sink = FileSink::new(&run_log_dir).unwrap();
-
-        for index in 0..50 {
-            let subject = test_subject(&run_log_dir, index);
-            sink.register_subject(&subject).unwrap();
-            sink.release_subject(subject.identity());
-        }
-        assert_eq!(sink.subject_writers.lock().unwrap().len(), 0);
-
-        // A registered-but-not-released subject keeps exactly its own writer.
-        let live = test_subject(&run_log_dir, 100);
-        sink.register_subject(&live).unwrap();
-        assert_eq!(sink.subject_writers.lock().unwrap().len(), 1);
-        sink.release_subject(live.identity());
-        assert_eq!(sink.subject_writers.lock().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn a_released_subject_is_not_reopened_by_a_late_event() {
-        // Cache-hit events carry a subject identity but no bound logger. Such an
-        // event must land in the run log only, never resurrect a subject writer.
-        let temp = tempdir().unwrap();
-        let run_log_dir = temp.path().join("logs").join("260603123456");
-        fs::create_dir_all(&run_log_dir).unwrap();
-        let sink = FileSink::new(&run_log_dir).unwrap();
-
-        let subject = test_subject(&run_log_dir, 3);
-        sink.register_subject(&subject).unwrap();
-        sink.release_subject(subject.identity());
-
-        let record = EventLogRecord::assemble(
-            0,
-            Some(0),
-            Some(subject.identity()),
-            &info_event("late"),
-            &run_log_dir,
-        );
-        sink.write_event(&record);
-        assert_eq!(sink.subject_writers.lock().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn dropping_a_bound_logger_flushes_and_closes_the_subject_log() {
-        // End-to-end over the path the executor actually takes: it drops the
-        // bound logger when a subject ends. Info events stay buffered and
-        // nothing flushes a finished subject afterwards, so the drop must --
-        // otherwise the tail of every subject log would survive only by luck.
-        let temp = tempdir().unwrap();
-        let run_log_dir = temp.path().join("logs").join("260603123456");
-        let logger = Arc::new(
-            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
-        );
-
-        let subject = test_subject(&run_log_dir, 7);
-        let subject_dir = run_log_dir.join("00000007-Sandbox-node");
-        let node_logger = logger.bind_subject(subject).unwrap();
-        node_logger.log_event(info_event("buffered info"));
-
-        let event_log = subject_dir.join("events.jsonl");
-        assert_eq!(fs::read_to_string(&event_log).unwrap(), "");
-
-        drop(node_logger);
-        let contents = fs::read_to_string(&event_log).unwrap();
-        let event: Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
-        assert_eq!(event["message"], Value::String("buffered info".to_string()));
     }
 
     #[test]
@@ -4095,14 +3834,9 @@ mod tests {
         );
         let build_key = "1111111111111111111111111111111111111111111111111111111111111111";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash");
-        let subject = BuildLogSubject::new(
-            "Sandbox",
-            "bash",
-            build_key,
-            subject_dir.clone(),
-            subject_dir.join("raw"),
-        );
-        let node_logger = logger.bind_subject(subject).unwrap();
+        fs::create_dir_all(subject_dir.join("raw")).unwrap();
+        let subject = BuildLogSubject::new("Sandbox", "bash", build_key, subject_dir.join("raw"));
+        let node_logger = logger.bind_subject(subject);
 
         node_logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
@@ -4139,10 +3873,7 @@ mod tests {
             Value::String(build_key.to_string())
         );
 
-        let subject_contents = fs::read_to_string(subject_dir.join("events.jsonl")).unwrap();
-        let subject_line = subject_contents.lines().last().unwrap();
-        // The run-level and subject-level lines are byte-identical.
-        assert_eq!(subject_line, line);
+        assert!(!subject_dir.join("events.jsonl").exists());
     }
 
     #[test]
@@ -4154,14 +3885,8 @@ mod tests {
         );
         let build_key = "4444444444444444444444444444444444444444444444444444444444444444";
         let subject_dir = run_log_dir.join("00000000-Erofs-image");
-        let subject = BuildLogSubject::new(
-            "Erofs",
-            "image",
-            build_key,
-            subject_dir.clone(),
-            subject_dir.join("raw"),
-        );
-        let node_logger = logger.bind_subject(subject).unwrap();
+        let subject = BuildLogSubject::new("Erofs", "image", build_key, subject_dir.join("raw"));
+        let node_logger = logger.bind_subject(subject);
 
         node_logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
@@ -4189,14 +3914,8 @@ mod tests {
         );
         let build_key = "5555555555555555555555555555555555555555555555555555555555555555";
         let subject_dir = run_log_dir.join("00000000-Tree-pkg");
-        let subject = BuildLogSubject::new(
-            "Tree",
-            "pkg",
-            build_key,
-            subject_dir.clone(),
-            subject_dir.join("raw"),
-        );
-        let node_logger = logger.bind_subject(subject).unwrap();
+        let subject = BuildLogSubject::new("Tree", "pkg", build_key, subject_dir.join("raw"));
+        let node_logger = logger.bind_subject(subject);
 
         for index in 0..3 {
             node_logger.log_event(BuildLogEvent {
@@ -4344,7 +4063,7 @@ mod tests {
                 .unwrap();
         let identity = SubjectIdentity::new("Tree", "cached", build_key);
 
-        // No bind_subject: a cache hit has no workspace, so no subject writer.
+        // No bind_subject: a cache hit has no workspace or raw log directory.
         logger.log_subject_event(
             &identity,
             BuildLogEvent {
@@ -4385,22 +4104,16 @@ mod tests {
         let build_key = "6666666666666666666666666666666666666666666666666666666666666666";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash");
         let raw_dir = subject_dir.join("raw");
-        let subject = BuildLogSubject::new(
-            "Sandbox",
-            "bash",
-            build_key,
-            subject_dir.clone(),
-            raw_dir.clone(),
-        );
-        let node_logger = logger.bind_subject(subject).unwrap();
+        let subject = BuildLogSubject::new("Sandbox", "bash", build_key, raw_dir.clone());
+        let node_logger = logger.bind_subject(subject);
 
         node_logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
             status: BuildStatus::Running,
-            op: Some("sandbox-result".to_string()),
-            message: "sandbox wrote manifest".to_string(),
+            op: Some("compiler".to_string()),
+            message: "compiler wrote diagnostics".to_string(),
             object_hash: None,
-            raw_log_path: Some(raw_dir.join("sandbox-result.log")),
+            raw_log_path: Some(raw_dir.join("compiler.log")),
             details: Map::new(),
         });
 
@@ -4409,7 +4122,7 @@ mod tests {
         let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(
             event["raw_log"],
-            Value::String("00000000-Sandbox-bash/raw/sandbox-result.log".to_string())
+            Value::String("00000000-Sandbox-bash/raw/compiler.log".to_string())
         );
     }
 
@@ -4423,14 +4136,9 @@ mod tests {
         let build_key = "2222222222222222222222222222222222222222222222222222222222222222";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash_debug_test");
         let raw_dir = subject_dir.join("raw");
-        let subject = BuildLogSubject::new(
-            "Sandbox",
-            "bash debug/test",
-            build_key,
-            subject_dir,
-            raw_dir.clone(),
-        );
-        let node_logger = logger.bind_subject(subject).unwrap();
+        let subject =
+            BuildLogSubject::new("Sandbox", "bash debug/test", build_key, raw_dir.clone());
+        let node_logger = logger.bind_subject(subject);
 
         let path = node_logger.allocate_raw_log_path("podman/run").unwrap();
         assert!(path.starts_with(&raw_dir));

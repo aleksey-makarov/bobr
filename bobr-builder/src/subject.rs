@@ -196,7 +196,6 @@ impl BuilderPlannedSubject {
             self.tag(),
             self.name(),
             self.build_key().to_string(),
-            workspace.log_dir().to_path_buf(),
             workspace.raw_log_dir().to_path_buf(),
         )
     }

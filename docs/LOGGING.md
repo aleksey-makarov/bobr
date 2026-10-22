@@ -101,16 +101,14 @@ output never emit terminal control sequences.
   index.jsonl                          workspace allocation index
   <serial>-<tag>[-<name>]/             one directory per built/materialized subject
     meta.json                          subject identity and paths
-    events.jsonl                       this subject's events only
-    raw/                               raw logs (step stdout/stderr, reports, …)
+    raw/                               raw logs (for example, step stdout/stderr)
 ```
 
 The run-level `events.jsonl` is created exclusively: a run given a log directory
 another run already wrote to fails at once, rather than appending to someone
 else's audit trail. It is the full audit log of the run: it contains run-level
-events plus a copy of every bound subject event. Each bound subject's own
-`events.jsonl` contains only that subject's events. Its run-level and
-subject-level copies are byte-identical, so tooling can match them.
+events and every bound subject event. To inspect one subject, filter this file
+by `subject.build_key`; `subject_seq` preserves that subject's local order.
 
 Events may carry a subject identity without being bound to a subject workspace.
 Cache hits and repository network events use this form: they appear only in the
@@ -135,16 +133,23 @@ producer can neither forge nor omit envelope fields.
   "ts": "2026-06-23T21:21:51.229Z",  // UTC, RFC3339, milliseconds, always 'Z'
   "level": "info",                   // info | warn | error
   "status": "done",                  // closed lifecycle enum (see below)
-  "op": "sandbox",                   // optional, free-form builder operation
+  "op": "sandbox-step",              // optional, free-form builder operation
   "subject": {                       // optional identity, even without a workspace
     "tag": "Sandbox",
     "name": "qemu-image",
     "build_key": "<full build key>",
     "object_hash": "<full object hash>"   // optional, when an object identity is known
   },
-  "message": "…",
-  "raw_log": "00000009-Sandbox-bash/raw/sandbox-result.log",  // optional, run-relative
-  "details": { }                     // optional
+  "message": "finished step 2/4: build (183 ms)",
+  "details": {                       // optional
+    "step_index": 1,
+    "step_total": 4,
+    "step_name": "build",
+    "run_as": "build-user",
+    "duration_ms": 183,
+    "stdout_path": "/host/path/to/build-stdout.log",
+    "stderr_path": "/host/path/to/build-stderr.log"
+  }
 }
 ```
 
@@ -235,6 +240,12 @@ carries the aggregate `content_providers`, `content_outcomes`, `files`, `bytes`,
 `hardlink`, `copy`, or `download`. This records split closures accurately when the
 manifest and its fs-files come from different repositories or use different
 transports.
+
+Sandbox steps emit `sandbox-step` events when a step starts, finishes, or
+fails. Their details include the zero-based step index, total count, name,
+execution identity, and, for terminal step events, duration and raw stdout and
+stderr paths. A cancelled sandbox can therefore end with `StepStarted` followed
+by the builder's `cancelled` event; no separate success report is written.
 
 ### Remote network events
 

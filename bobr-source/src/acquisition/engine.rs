@@ -266,16 +266,12 @@ async fn process_source_inner(
         .run
         .create_workspace("Source", &entry.name, declared.to_string())
         .map_err(|error| error.to_string())?;
-    let subject_logger = engine
-        .logger
-        .bind_subject(BuildLogSubject::new(
-            "Source",
-            entry.name.clone(),
-            declared.to_string(),
-            workspace.log_dir().to_path_buf(),
-            workspace.raw_log_dir().to_path_buf(),
-        ))
-        .map_err(|error| error.to_string())?;
+    let subject_logger = engine.logger.bind_subject(BuildLogSubject::new(
+        "Source",
+        entry.name.clone(),
+        declared.to_string(),
+        workspace.raw_log_dir().to_path_buf(),
+    ));
     // The intended host travels with `start`: until the first request goes out
     // the download is queued, and the live log counts what is waiting per host.
     subject_logger.log_event(BuildLogEvent {

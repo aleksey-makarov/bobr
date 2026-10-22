@@ -14,7 +14,7 @@ use nix::sys::wait::WaitStatus;
 use nix::unistd::Pid;
 use std::fs::{self, File};
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 
 /// Maps a `nix` errno into an `io::Error` that preserves the OS error code (and
@@ -63,7 +63,7 @@ struct CapData {
 
 /// Reads the launcher config, waits for the parent handshake, and runs the
 /// supervisor. Returns the process exit code.
-pub fn launch(wait_fd: RawFd, config_path: &Path) -> i32 {
+pub fn launch(wait_fd: RawFd, event_fd: RawFd, config_path: &Path) -> i32 {
     let config = match read_launcher_config(config_path) {
         Ok(config) => config,
         Err(error) => {
@@ -91,8 +91,12 @@ pub fn launch(wait_fd: RawFd, config_path: &Path) -> i32 {
     unsafe {
         libc::close(wait_fd);
     }
+    if let Err(error) = set_close_on_exec(event_fd) {
+        write_launcher_failure(&launcher_failure_report, "launcher-event-fd", error);
+        return 1;
+    }
 
-    match run_supervisor(&config, &launcher_failure_report) {
+    match run_supervisor(&config, &launcher_failure_report, event_fd) {
         Ok(code) => code,
         Err(error) => {
             write_launcher_failure(&launcher_failure_report, "launcher-bootstrap", error);
@@ -125,7 +129,11 @@ fn read_launcher_config(path: &Path) -> Result<SandboxLauncherConfig, String> {
     Ok(config)
 }
 
-fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result<i32> {
+fn run_supervisor(
+    config: &SandboxLauncherConfig,
+    failure_report: &File,
+    event_fd: RawFd,
+) -> io::Result<i32> {
     unshare_namespace("mount namespace", CloneFlags::CLONE_NEWNS)?;
     unshare_namespace("network namespace", CloneFlags::CLONE_NEWNET)?;
     bring_loopback_up().map_err(|error| context_error("bring up loopback", error))?;
@@ -153,7 +161,7 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
         unsafe {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
         }
-        let code = match run_pid1(config, failure_report) {
+        let code = match run_pid1(config, failure_report, event_fd) {
             Ok(code) => code,
             Err(error) => {
                 write_launcher_failure(failure_report, "launcher-pid1", error);
@@ -163,10 +171,17 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
         unsafe { libc::_exit(code) };
     }
 
+    unsafe {
+        libc::close(event_fd);
+    }
     wait_for_child(Pid::from_raw(pid))
 }
 
-fn run_pid1(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result<i32> {
+fn run_pid1(
+    config: &SandboxLauncherConfig,
+    failure_report: &File,
+    event_fd: RawFd,
+) -> io::Result<i32> {
     mount_root_overlay(config).map_err(|error| context_error("mount root overlay", error))?;
     mount_layout(config).map_err(|error| context_error("mount sandbox layout", error))?;
     set_no_new_privs().map_err(|error| context_error("set no_new_privs", error))?;
@@ -175,7 +190,8 @@ fn run_pid1(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result
     std::env::set_current_dir("/")
         .map_err(|error| context_error("chdir '/' after chroot", error))?;
     drop_capabilities().map_err(|error| context_error("drop capabilities", error))?;
-    match run_config_path(&config.runner_config) {
+    let event_writer = unsafe { File::from_raw_fd(event_fd) };
+    match run_config_path(&config.runner_config, event_writer) {
         // The runner created its reports and owns their contents; the launcher
         // must not touch the failure report on this path.
         RunnerOutcome::Reported(code) => Ok(code),
@@ -187,6 +203,17 @@ fn run_pid1(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result
             Ok(2)
         }
     }
+}
+
+fn set_close_on_exec(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn mount_layout(config: &SandboxLauncherConfig) -> io::Result<()> {
@@ -557,6 +584,7 @@ fn write_launcher_report(file: &File, report: &SandboxRunnerFailureReport) {
 mod tests {
     use super::*;
     use crate::protocol::SandboxRootOverlay;
+    use std::os::fd::AsRawFd;
     use std::path::PathBuf;
 
     #[test]
@@ -585,6 +613,18 @@ mod tests {
 
         let mask = capability_mask(KEEP_CAPABILITIES);
         assert_ne!(mask[0] & (1_u32 << CAP_KILL), 0);
+    }
+
+    #[test]
+    fn sandbox_event_fd_is_close_on_exec() {
+        let file = tempfile::tempfile().unwrap();
+        let fd = file.as_raw_fd();
+
+        set_close_on_exec(fd).unwrap();
+
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
     }
 
     #[test]

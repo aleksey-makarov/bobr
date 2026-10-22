@@ -110,7 +110,7 @@ expected_build_info="$(printf \
 [ "${build_info}" = "${expected_build_info}" ] \
   || die "unexpected bobr build information: ${build_info}"
 protocol_info="$("${root}/bin/bobr-sandbox-launcher" --protocol-info)"
-[ "${protocol_info}" = '{"name":"bobr-sandbox-launcher","protocol_version":6}' ] \
+[ "${protocol_info}" = '{"name":"bobr-sandbox-launcher","protocol_version":7}' ] \
   || die "unexpected sandbox launcher protocol info: ${protocol_info}"
 
 smoke="${staging}/smoke"

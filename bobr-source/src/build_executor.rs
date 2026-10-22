@@ -46,8 +46,6 @@ pub enum BuildExecutorError {
     Setup(String),
     /// Run workspace allocation or scratch management failed.
     Run(String),
-    /// Subject logger setup failed.
-    Logging(String),
     /// Builder implementation returned an error.
     Build(String),
     /// Builder worker panicked.
@@ -64,7 +62,6 @@ impl fmt::Display for BuildExecutorError {
             | Self::Cancelled(message)
             | Self::Setup(message)
             | Self::Run(message)
-            | Self::Logging(message)
             | Self::Build(message)
             | Self::Panic(message)
             | Self::Publish(message) => formatter.write_str(message),
@@ -180,7 +177,7 @@ impl BuilderJob {
     /// Announces acceptance into the executor FIFO before a worker can start.
     ///
     /// This is deliberately a transient run-level subject event: no workspace
-    /// exists yet, so there cannot be a subject log file. The live renderer
+    /// exists yet, so there cannot be a bound subject logger. The live renderer
     /// uses it to distinguish workers truly running from builders waiting for
     /// a bounded executor slot.
     fn log_queued(&self) {
@@ -419,8 +416,7 @@ pub fn execute_builder_staged(
         BuilderScratchGuard::new(execution.run.clone(), workspace.temp_dir().to_path_buf());
     let logger = execution
         .run_logger
-        .bind_subject(subject.log_subject(&workspace))
-        .map_err(BuildExecutorError::Logging)?;
+        .bind_subject(subject.log_subject(&workspace));
     scratch.set_logger(logger.clone());
     let mut terminal = BuilderTerminalGuard::new(logger.clone(), execution.cancellation.clone());
     log_builder_event(

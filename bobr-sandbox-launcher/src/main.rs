@@ -26,8 +26,8 @@ fn main() {
     }
 
     match parse_launch_args(&args) {
-        Ok((wait_fd, config_path)) => {
-            std::process::exit(launch(wait_fd, &config_path));
+        Ok((wait_fd, event_fd, config_path)) => {
+            std::process::exit(launch(wait_fd, event_fd, &config_path));
         }
         Err(message) => {
             eprintln!("{message}");
@@ -36,12 +36,15 @@ fn main() {
     }
 }
 
-fn parse_launch_args(args: &[OsString]) -> Result<(RawFd, PathBuf), String> {
-    let usage = || "usage: bobr-sandbox-launcher launch --wait-fd FD --config PATH".to_string();
-    if args.len() != 6
+fn parse_launch_args(args: &[OsString]) -> Result<(RawFd, RawFd, PathBuf), String> {
+    let usage = || {
+        "usage: bobr-sandbox-launcher launch --wait-fd FD --event-fd FD --config PATH".to_string()
+    };
+    if args.len() != 8
         || args[1].to_str() != Some("launch")
         || args[2].to_str() != Some("--wait-fd")
-        || args[4].to_str() != Some("--config")
+        || args[4].to_str() != Some("--event-fd")
+        || args[6].to_str() != Some("--config")
     {
         return Err(usage());
     }
@@ -49,7 +52,14 @@ fn parse_launch_args(args: &[OsString]) -> Result<(RawFd, PathBuf), String> {
         .to_str()
         .and_then(|value| value.parse::<RawFd>().ok())
         .ok_or_else(|| format!("invalid --wait-fd '{}'", args[3].to_string_lossy()))?;
-    Ok((wait_fd, PathBuf::from(&args[5])))
+    let event_fd = args[5]
+        .to_str()
+        .and_then(|value| value.parse::<RawFd>().ok())
+        .ok_or_else(|| format!("invalid --event-fd '{}'", args[5].to_string_lossy()))?;
+    if wait_fd <= libc::STDERR_FILENO || event_fd <= libc::STDERR_FILENO || wait_fd == event_fd {
+        return Err("protocol fds must be distinct and must not be stdio".to_string());
+    }
+    Ok((wait_fd, event_fd, PathBuf::from(&args[7])))
 }
 
 #[cfg(test)]
@@ -67,13 +77,16 @@ mod tests {
             "launch",
             "--wait-fd",
             "7",
+            "--event-fd",
+            "8",
             "--config",
             "/tmp/config.json",
         ]);
 
-        let (fd, path) = parse_launch_args(&args).unwrap();
+        let (wait_fd, event_fd, path) = parse_launch_args(&args).unwrap();
 
-        assert_eq!(fd, 7);
+        assert_eq!(wait_fd, 7);
+        assert_eq!(event_fd, 8);
         assert_eq!(path, PathBuf::from("/tmp/config.json"));
     }
 
@@ -92,10 +105,30 @@ mod tests {
             OsString::from("launch"),
             OsString::from("--wait-fd"),
             OsString::from_vec(vec![0xff, 0xfe]),
+            OsString::from("--event-fd"),
+            OsString::from("8"),
             OsString::from("--config"),
             OsString::from("/tmp/config.json"),
         ];
 
         assert!(parse_launch_args(&args).unwrap_err().contains("--wait-fd"));
+    }
+
+    #[test]
+    fn rejects_stdio_and_duplicate_protocol_fds() {
+        for (wait_fd, event_fd) in [(2, 8), (7, 2), (7, 7)] {
+            let args = os_args(&[
+                "bobr-sandbox-launcher",
+                "launch",
+                "--wait-fd",
+                &wait_fd.to_string(),
+                "--event-fd",
+                &event_fd.to_string(),
+                "--config",
+                "/tmp/config.json",
+            ]);
+
+            assert!(parse_launch_args(&args).is_err());
+        }
     }
 }

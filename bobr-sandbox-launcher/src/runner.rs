@@ -1,9 +1,9 @@
-//! In-namespace runner: executes the ordered steps as pid 1 and writes the
-//! success/failure reports.
+//! In-namespace runner: executes the ordered steps as pid 1, streams step
+//! events, and writes failures to the authoritative report.
 
 use crate::protocol::{
-    RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION,
-    SandboxRunnerFailureReport, SandboxRunnerSuccessReport, SandboxStepReport,
+    RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxEvent,
+    SandboxRunnerFailureReport, write_sandbox_event,
 };
 use nix::dir::Dir;
 use nix::errno::Errno;
@@ -29,7 +29,7 @@ const BUILD_USER_GID: u32 = 1;
 /// Step-coupled failure-report constructors. The pure constructors live in
 /// `protocol`; these reference [`SandboxRunnerStep`] so they belong here.
 impl SandboxRunnerFailureReport {
-    fn step_runtime(step: &SandboxRunnerStep, message: String, duration_ms: u128) -> Self {
+    fn step_runtime(step: &SandboxRunnerStep, message: String, duration_ms: u64) -> Self {
         Self {
             label: step.name.clone(),
             message,
@@ -41,7 +41,7 @@ impl SandboxRunnerFailureReport {
         }
     }
 
-    fn failed_step(step: &SandboxRunnerStep, status: &ExitStatus, duration_ms: u128) -> Self {
+    fn failed_step(step: &SandboxRunnerStep, status: &ExitStatus, duration_ms: u64) -> Self {
         let (message, exit_code, signal) = match classify_exit_status(status) {
             StepExit::Exited(code) => (
                 format!(
@@ -93,7 +93,7 @@ pub enum RunnerOutcome {
 /// Reads and decodes the runner config from `path`, then runs it via
 /// [`run_config`]. A read/parse failure is returned as an
 /// [`EarlyFailure`](RunnerOutcome::EarlyFailure) for the launcher to record.
-pub fn run_config_path(path: &Path) -> RunnerOutcome {
+pub fn run_config_path(path: &Path, event_writer: File) -> RunnerOutcome {
     let config = match fs::read(path)
         .map_err(|error| format!("failed to read runner config '{}': {error}", path.display()))
         .and_then(|bytes| serde_json::from_slice::<RunnerConfig>(&bytes).map_err(|e| e.to_string()))
@@ -107,13 +107,13 @@ pub fn run_config_path(path: &Path) -> RunnerOutcome {
         }
     };
 
-    run_config(config)
+    run_config(config, event_writer)
 }
 
 /// Runs the build steps described by `config` as pid 1 inside the sandbox,
 /// returning a [`RunnerOutcome`] (a reported exit code, or an early failure the
 /// launcher must record).
-pub fn run_config(config: RunnerConfig) -> RunnerOutcome {
+pub fn run_config(config: RunnerConfig, event_writer: File) -> RunnerOutcome {
     if config.protocol_version != SANDBOX_PROTOCOL_VERSION {
         return RunnerOutcome::EarlyFailure(SandboxRunnerFailureReport::runtime(
             "sandbox-protocol",
@@ -123,7 +123,7 @@ pub fn run_config(config: RunnerConfig) -> RunnerOutcome {
             ),
         ));
     }
-    let runner = match SandboxRunner::new(config) {
+    let runner = match SandboxRunner::new(config, event_writer) {
         Ok(runner) => runner,
         Err(error) => {
             return RunnerOutcome::EarlyFailure(SandboxRunnerFailureReport::runtime(
@@ -138,8 +138,8 @@ pub fn run_config(config: RunnerConfig) -> RunnerOutcome {
 struct SandboxRunner {
     prepare_paths: Vec<PathBuf>,
     steps: Vec<SandboxRunnerStep>,
-    success_report: File,
     failure_report: File,
+    event_writer: Option<File>,
 }
 
 type RunnerResult<T> = Result<T, Box<SandboxRunnerFailureReport>>;
@@ -149,14 +149,10 @@ fn runner_error(report: SandboxRunnerFailureReport) -> Box<SandboxRunnerFailureR
 }
 
 impl SandboxRunner {
-    fn new(config: RunnerConfig) -> io::Result<Self> {
-        // Both reports are created up front on purpose: this truncates any stale
-        // report from a previous run and fails fast on permission problems. As a
-        // result the "opposite" report is left empty (e.g. an empty failure
-        // report on success). The authoritative signal is the process exit code,
-        // not the existence or non-emptiness of either file; the runtime treats
-        // an empty report as a fallback (see bobr-sandbox reports/lifecycle).
-        let success_report = File::create(&config.success_report)?;
+    fn new(config: RunnerConfig, event_writer: File) -> io::Result<Self> {
+        // Truncate the report before executing steps. The process exit status
+        // remains authoritative; an empty report lets the caller fall back to
+        // launcher stderr if the runner cannot record a structured failure.
         let failure_report = File::create(&config.failure_report)?;
         let steps = config
             .steps
@@ -166,21 +162,14 @@ impl SandboxRunner {
         Ok(Self {
             prepare_paths: config.prepare_paths,
             steps,
-            success_report,
             failure_report,
+            event_writer: Some(event_writer),
         })
     }
 
-    fn exec(&self) -> i32 {
+    fn exec(mut self) -> i32 {
         let exit_code = match self.run() {
-            Ok(outcome) => {
-                if let Err(error) = self.write_success(&outcome) {
-                    eprintln!("{error}");
-                    1
-                } else {
-                    0
-                }
-            }
+            Ok(()) => 0,
             Err(report) => {
                 if let Err(error) = self.write_failure(&report) {
                     eprintln!("{error}");
@@ -192,15 +181,52 @@ impl SandboxRunner {
         exit_code
     }
 
-    fn run(&self) -> RunnerResult<SandboxRunnerOutcome> {
+    fn run(&mut self) -> RunnerResult<()> {
         self.prepare()?;
 
-        let mut reports = Vec::new();
-        for step in &self.steps {
-            reports.push(step.run()?);
+        let total = self.steps.len();
+        for index in 0..total {
+            let name = self.steps[index].name.clone();
+            let run_as = self.steps[index].run_as;
+            self.emit(SandboxEvent::StepStarted {
+                index,
+                total,
+                name,
+                run_as,
+            });
+            let result = self.steps[index].run();
+            match result {
+                Ok(duration_ms) => {
+                    let step = &self.steps[index];
+                    self.emit(SandboxEvent::StepFinished {
+                        index,
+                        total,
+                        name: step.name.clone(),
+                        run_as: step.run_as,
+                        duration_ms,
+                        stdout_path: step.report_stdout_path.clone(),
+                        stderr_path: step.report_stderr_path.clone(),
+                    });
+                }
+                Err(report) => {
+                    let step = &self.steps[index];
+                    self.emit(SandboxEvent::StepFailed {
+                        index,
+                        total,
+                        name: step.name.clone(),
+                        run_as: step.run_as,
+                        duration_ms: report.duration_ms.unwrap_or(0),
+                        exit_code: report.exit_code,
+                        signal: report.signal,
+                        stdout_path: step.report_stdout_path.clone(),
+                        stderr_path: step.report_stderr_path.clone(),
+                    });
+                    return Err(report);
+                }
+            }
         }
 
-        Ok(SandboxRunnerOutcome { steps: reports })
+        Ok(())
     }
 
     fn prepare(&self) -> RunnerResult<()> {
@@ -212,21 +238,18 @@ impl SandboxRunner {
         Ok(())
     }
 
-    fn write_success(&self, outcome: &SandboxRunnerOutcome) -> io::Result<()> {
-        let report = SandboxRunnerSuccessReport {
-            steps: outcome.steps.clone(),
-        };
-        serde_json::to_writer(&self.success_report, &report).map_err(io::Error::other)?;
-        Ok(())
-    }
-
     fn write_failure(&self, report: &SandboxRunnerFailureReport) -> io::Result<()> {
         serde_json::to_writer(&self.failure_report, report).map_err(io::Error::other)
     }
-}
 
-struct SandboxRunnerOutcome {
-    steps: Vec<SandboxStepReport>,
+    fn emit(&mut self, event: SandboxEvent) {
+        let Some(writer) = &mut self.event_writer else {
+            return;
+        };
+        if write_sandbox_event(writer, &event).is_err() {
+            self.event_writer = None;
+        }
+    }
 }
 
 struct SandboxRunnerStep {
@@ -259,7 +282,7 @@ impl SandboxRunnerStep {
         })
     }
 
-    fn run(&self) -> RunnerResult<SandboxStepReport> {
+    fn run(&self) -> RunnerResult<u64> {
         let executable = self.argv.first().ok_or_else(|| {
             runner_error(SandboxRunnerFailureReport::step_runtime(
                 self,
@@ -330,14 +353,7 @@ impl SandboxRunnerStep {
         terminate_remaining_children();
         let duration_ms = elapsed_ms(start);
         if status.success() {
-            Ok(SandboxStepReport {
-                name: self.name.clone(),
-                run_as: self.run_as.as_str().to_string(),
-                exit_code: status.code().unwrap_or(0),
-                duration_ms,
-                stdout_path: self.report_stdout_path.clone(),
-                stderr_path: self.report_stderr_path.clone(),
-            })
+            Ok(duration_ms)
         } else {
             Err(runner_error(SandboxRunnerFailureReport::failed_step(
                 self,
@@ -348,8 +364,8 @@ impl SandboxRunnerStep {
     }
 }
 
-fn elapsed_ms(start: Instant) -> u128 {
-    start.elapsed().as_millis()
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// How a finished step process terminated, used to build its failure report.
@@ -530,7 +546,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let config = test_config(temp.path()).with_protocol(SANDBOX_PROTOCOL_VERSION + 1);
 
-        let report = early_failure(run_config(config));
+        let report = early_failure(run_config(config, event_writer(temp.path())));
 
         assert_eq!(report.label, "sandbox-protocol");
         assert!(
@@ -545,16 +561,16 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path()).with_protocol(SANDBOX_PROTOCOL_VERSION);
         // A report path under a missing directory makes File::create in
-        // SandboxRunner::new fail before the runner owns any report.
-        config.success_report = temp.path().join("missing-dir").join("success.json");
+        // SandboxRunner::new fail before the runner owns the report.
+        config.failure_report = temp.path().join("missing-dir").join("failure.json");
 
-        let report = early_failure(run_config(config));
+        let report = early_failure(run_config(config, event_writer(temp.path())));
 
         assert_eq!(report.label, "sandbox-runner-init");
     }
 
     #[test]
-    fn run_config_executes_root_step_and_writes_success_report() {
+    fn run_config_executes_root_step_and_streams_events() {
         let temp = tempdir().unwrap();
         let output = temp.path().join("out");
         fs::create_dir(&output).unwrap();
@@ -572,14 +588,22 @@ mod tests {
             stderr.clone(),
         );
 
-        let exit_code = reported_code(run_config(config.clone()));
+        let exit_code = reported_code(run_config(config, event_writer(temp.path())));
 
         assert_eq!(exit_code, 0);
         assert_eq!(fs::read_to_string(output.join("file")).unwrap(), "payload");
         assert_eq!(fs::read_to_string(stdout).unwrap(), "hello");
-        let report = read_success_report(&config.success_report);
-        assert_eq!(report.steps.len(), 1);
-        assert_eq!(report.steps[0].name, "write-output");
+        let events = read_events(temp.path());
+        assert!(matches!(
+            &events[0],
+            SandboxEvent::StepStarted { index: 0, total: 1, name, .. }
+                if name == "write-output"
+        ));
+        assert!(matches!(
+            &events[1],
+            SandboxEvent::StepFinished { index: 0, total: 1, name, .. }
+                if name == "write-output"
+        ));
     }
 
     #[test]
@@ -599,7 +623,7 @@ mod tests {
             stderr.clone(),
         );
 
-        let exit_code = reported_code(run_config(config.clone()));
+        let exit_code = reported_code(run_config(config.clone(), event_writer(temp.path())));
 
         assert_eq!(exit_code, 1);
         assert_eq!(fs::read_to_string(&stderr).unwrap(), "nope");
@@ -608,6 +632,45 @@ mod tests {
         assert_eq!(report.exit_code, Some(7));
         assert_eq!(report.stdout_path.as_ref(), Some(&stdout));
         assert_eq!(report.stderr_path.as_ref(), Some(&stderr));
+        let events = read_events(temp.path());
+        assert!(matches!(events[0], SandboxEvent::StepStarted { .. }));
+        assert!(matches!(
+            events[1],
+            SandboxEvent::StepFailed {
+                exit_code: Some(7),
+                signal: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn run_config_streams_signal_failure() {
+        let temp = tempdir().unwrap();
+        let config = test_config(temp.path()).with_step(
+            "signal-step",
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "kill -TERM $$".to_string(),
+            ],
+            HashMap::new(),
+            temp.path().join("stdout.log"),
+            temp.path().join("stderr.log"),
+        );
+
+        let exit_code = reported_code(run_config(config, event_writer(temp.path())));
+
+        assert_eq!(exit_code, 1);
+        let events = read_events(temp.path());
+        assert!(matches!(
+            events[1],
+            SandboxEvent::StepFailed {
+                exit_code: None,
+                signal: Some(libc::SIGTERM),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -630,7 +693,7 @@ mod tests {
             stderr,
         );
 
-        let exit_code = reported_code(run_config(config));
+        let exit_code = reported_code(run_config(config, event_writer(temp.path())));
 
         assert_eq!(exit_code, 0);
         let mode = fs::metadata(output.join("file"))
@@ -639,6 +702,31 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn failed_event_transport_does_not_change_success() {
+        let temp = tempdir().unwrap();
+        let config = test_config(temp.path()).with_step(
+            "true",
+            vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
+            HashMap::new(),
+            temp.path().join("stdout.log"),
+            temp.path().join("stderr.log"),
+        );
+        let writer = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+
+        let exit_code = reported_code(run_config(config, writer));
+
+        let failure = if exit_code == 0 {
+            String::new()
+        } else {
+            fs::read_to_string(temp.path().join("failure.json")).unwrap()
+        };
+        assert_eq!(exit_code, 0, "{failure}");
     }
 
     #[test]
@@ -657,7 +745,7 @@ mod tests {
 
         // An invalid umask is rejected while building the step inside
         // SandboxRunner::new, before the runner owns its reports.
-        let report = early_failure(run_config(config));
+        let report = early_failure(run_config(config, event_writer(temp.path())));
 
         assert_eq!(report.label, "sandbox-runner-init");
     }
@@ -668,7 +756,7 @@ mod tests {
         let path = temp.path().join("runner-config.json");
         fs::write(&path, "not json").unwrap();
 
-        let report = early_failure(run_config_path(&path));
+        let report = early_failure(run_config_path(&path, event_writer(temp.path())));
 
         assert_eq!(report.label, "runner-config");
     }
@@ -789,14 +877,25 @@ mod tests {
                 protocol_version: SANDBOX_PROTOCOL_VERSION,
                 prepare_paths: Vec::new(),
                 steps: Vec::new(),
-                success_report: root.join("success.json"),
                 failure_report: root.join("failure.json"),
             },
         }
     }
 
-    fn read_success_report(path: &Path) -> SandboxRunnerSuccessReport {
-        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    fn event_writer(root: &Path) -> File {
+        File::create(root.join("events.bin")).unwrap()
+    }
+
+    fn read_events(root: &Path) -> Vec<SandboxEvent> {
+        let bytes = fs::read(root.join("events.bin")).unwrap();
+        let mut decoder = crate::protocol::SandboxEventDecoder::default();
+        decoder.push(&bytes);
+        let mut events = Vec::new();
+        while let Some(event) = decoder.next_event().unwrap() {
+            events.push(event);
+        }
+        decoder.finish().unwrap();
+        events
     }
 
     fn read_failure_report(path: &Path) -> SandboxRunnerFailureReport {
