@@ -77,6 +77,24 @@ pub(crate) fn run_sandbox_launcher(
     cancellation: &CancellationReceiver,
     emit: &mut dyn FnMut(SandboxEvent) -> RuntimeResult<()>,
 ) -> Result<LauncherOutcome, RuntimeError> {
+    run_sandbox_launcher_command(
+        Command::new(launcher_path),
+        launcher_path,
+        launcher_config,
+        failure_report,
+        cancellation,
+        emit,
+    )
+}
+
+fn run_sandbox_launcher_command(
+    mut command: Command,
+    launcher_path: &Path,
+    launcher_config: &Path,
+    failure_report: &Path,
+    cancellation: &CancellationReceiver,
+    emit: &mut dyn FnMut(SandboxEvent) -> RuntimeResult<()>,
+) -> Result<LauncherOutcome, RuntimeError> {
     if cancellation.is_cancelled()? {
         return Ok(LauncherOutcome::Cancelled);
     }
@@ -107,7 +125,6 @@ pub(crate) fn run_sandbox_launcher(
     let inherited_wait_fd = inherited_wait.as_raw_fd();
     let inherited_event_fd = inherited_event.as_raw_fd();
     let expected_parent = unsafe { libc::getpid() };
-    let mut command = Command::new(launcher_path);
     command
         .arg("launch")
         .arg("--wait-fd")
@@ -473,6 +490,12 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    fn test_launcher_command(path: &Path) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.arg(path);
+        command
+    }
+
     fn make_fifo(path: &Path) {
         let path = CString::new(path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
@@ -598,7 +621,8 @@ mod tests {
         let thread = thread::spawn(move || {
             let receiver = CancellationReceiver::open(thread_token.fifo_path()).unwrap();
             let mut emit = |_| Ok(());
-            run_sandbox_launcher(
+            run_sandbox_launcher_command(
+                test_launcher_command(&thread_launcher),
                 &thread_launcher,
                 &thread_launcher_config,
                 &thread_failure,
@@ -631,7 +655,8 @@ mod tests {
         let token = CancellationToken::new().unwrap();
         let receiver = CancellationReceiver::open(token.fifo_path()).unwrap();
         let mut emit = |_| Ok(());
-        let error = run_sandbox_launcher(
+        let error = run_sandbox_launcher_command(
+            test_launcher_command(&launcher),
             &launcher,
             &temp.path().join("config"),
             &temp.path().join("failure.json"),
@@ -666,7 +691,8 @@ mod tests {
         let receiver = CancellationReceiver::open(token.fifo_path()).unwrap();
         let mut events = Vec::new();
 
-        let outcome = run_sandbox_launcher(
+        let outcome = run_sandbox_launcher_command(
+            test_launcher_command(&launcher),
             &launcher,
             &launcher_config,
             &temp.path().join("failure.json"),
