@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.13
+
+- Cancelled running sandboxes and source acquisitions cooperatively on
+  `SIGINT` and `SIGTERM`.
+- Added typed runtime events and showed the active sandbox step in the realtime
+  view while keeping one structured event log per run.
+- Preserved pinned-CA TLS diagnostics from remote repositories and avoided
+  retrying certificate validation failures.
+
 ## 0.1.12
 
 - Made remote repositories tolerate individual download failures and idle
