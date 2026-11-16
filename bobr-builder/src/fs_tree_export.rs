@@ -1,17 +1,15 @@
 use crate::BuilderError;
+use crate::plain_tree_compose::{PlainTreeComposeFunction, PlainTreeComposeInput, PlainTreeOp};
 use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
-use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::Runtime;
 use bobr_store::fs_tree::{FsTree, FsTreeEntry, FsTreeManifest};
 use globset::Glob;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::fs;
-use std::os::unix::fs::{PermissionsExt, lchown, symlink};
 use std::path::{Path, PathBuf};
 
 const EXPORT_ROOT_DIR_NAME: &str = "fs-tree-export-root";
-const EXPORTED_DIR_MODE: u32 = 0o755;
 
 /// Configuration for [`FsTreeExportBuilder`]: an ordered list of copy commands.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,7 +59,8 @@ impl TypedBuilder for FsTreeExportBuilder {
     }
 
     fn impl_version(&self) -> &'static str {
-        "1"
+        // Unified runtime composition and privileged destination validation.
+        "2"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -122,13 +121,15 @@ fn build_fs_tree_export(
 
     cx.runtime()
         .run(
-            &FsTreeExportFunction,
-            FsTreeExportInput {
+            &PlainTreeComposeFunction,
+            PlainTreeComposeInput {
                 output_root: output_root.clone(),
                 ops,
+                cancellation_fifo: cx.cancellation_token().fifo_path().to_path_buf(),
             },
         )
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?
+        .into_builder_result()?;
 
     Ok(output_root)
 }
@@ -138,7 +139,7 @@ fn resolve_export_plan(
     manifest: &FsTreeManifest,
     fs_tree: &FsTree,
     copies: &[CopyCommand],
-) -> Result<Vec<ExportOp>, BuilderError> {
+) -> Result<Vec<PlainTreeOp>, BuilderError> {
     let mut ops = Vec::new();
     let mut destinations = BTreeSet::<String>::new();
 
@@ -164,9 +165,9 @@ fn resolve_export_plan(
                             "failed to resolve fs-file for '{dest}': {error}"
                         ))
                     })?;
-                    ExportOp::CopyFile { source, dest }
+                    PlainTreeOp::CopyFile { source, dest }
                 }
-                FsTreeEntry::Symlink { target, .. } => ExportOp::Symlink {
+                FsTreeEntry::Symlink { target, .. } => PlainTreeOp::Symlink {
                     target: target.clone(),
                     dest,
                 },
@@ -304,114 +305,6 @@ fn validate_output_rel_path(path: &str) -> Result<(), BuilderError> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FsTreeExportFunction;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct FsTreeExportInput {
-    output_root: PathBuf,
-    ops: Vec<ExportOp>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, tag = "op", rename_all = "kebab-case")]
-enum ExportOp {
-    /// Copy a regular file from its `fs-files` source path to `dest`.
-    CopyFile { source: PathBuf, dest: String },
-    /// Recreate a symlink pointing at `target` at `dest`.
-    Symlink { target: String, dest: String },
-}
-
-impl ExportOp {
-    fn dest(&self) -> &str {
-        match self {
-            Self::CopyFile { dest, .. } | Self::Symlink { dest, .. } => dest,
-        }
-    }
-}
-
-impl RuntimeFunction for FsTreeExportFunction {
-    type Input = FsTreeExportInput;
-    type Output = ();
-    type Event = NoRuntimeEvent;
-
-    fn name(&self) -> &'static str {
-        "fs-tree-export"
-    }
-
-    fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
-        export_to_plain_object(input).map_err(RuntimeError::new)
-    }
-}
-
-/// Writes the resolved operations into `output_root` and normalizes ownership so
-/// the result is a single-owner plain object. Runs as namespace root, so it can
-/// read fs-files regardless of their logical owner and set `0:0`.
-fn export_to_plain_object(input: FsTreeExportInput) -> Result<(), String> {
-    fs::create_dir(&input.output_root).map_err(|error| {
-        format!(
-            "failed to create export root '{}': {error}",
-            input.output_root.display()
-        )
-    })?;
-
-    for op in &input.ops {
-        let dest = input.output_root.join(op.dest());
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!("failed to create directory '{}': {error}", parent.display())
-            })?;
-        }
-        match op {
-            ExportOp::CopyFile { source, .. } => {
-                fs::copy(source, &dest).map_err(|error| {
-                    format!(
-                        "failed to copy '{}' to '{}': {error}",
-                        source.display(),
-                        dest.display()
-                    )
-                })?;
-            }
-            ExportOp::Symlink { target, .. } => {
-                symlink(target, &dest).map_err(|error| {
-                    format!("failed to create symlink '{}': {error}", dest.display())
-                })?;
-            }
-        }
-    }
-
-    normalize_ownership(&input.output_root)?;
-    Ok(())
-}
-
-/// Recursively sets every entry under `root` (and `root` itself) to owner `0:0`,
-/// leaving file modes intact (so the executable bit is preserved) and pinning
-/// directory modes to a canonical `0755` for a deterministic plain object.
-fn normalize_ownership(root: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(root)
-        .map_err(|error| format!("failed to inspect '{}': {error}", root.display()))?;
-    let file_type = metadata.file_type();
-
-    if file_type.is_dir() {
-        let mut entries = fs::read_dir(root)
-            .map_err(|error| format!("failed to read '{}': {error}", root.display()))?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read '{}': {error}", root.display()))?;
-        entries.sort();
-        for child in entries {
-            normalize_ownership(&child)?;
-        }
-        fs::set_permissions(root, fs::Permissions::from_mode(EXPORTED_DIR_MODE))
-            .map_err(|error| format!("failed to chmod '{}': {error}", root.display()))?;
-    }
-
-    // lchown so a symlink is chowned itself, not its target.
-    lchown(root, Some(0), Some(0))
-        .map_err(|error| format!("failed to chown '{}' to 0:0: {error}", root.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +338,111 @@ mod tests {
             .collect::<Vec<_>>();
         out.sort();
         out
+    }
+
+    #[test]
+    fn registered_builder_exports_independent_files_symlinks_and_canonical_directories() {
+        use std::collections::BTreeMap;
+        use std::fs;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("usr/bin")).unwrap();
+        fs::set_permissions(source.join("usr"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(source.join("usr/bin"), fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(source.join("usr/bin/tool"), b"tool").unwrap();
+        fs::set_permissions(
+            source.join("usr/bin/tool"),
+            fs::Permissions::from_mode(0o751),
+        )
+        .unwrap();
+        symlink("tool", source.join("usr/bin/link")).unwrap();
+        let fs_tree = store_fs_tree(temp.path());
+        let manifest_path = temp.path().join("manifest");
+        let manifest = fs_tree.intern_tree(source).unwrap();
+        manifest.write_canonical(&manifest_path).unwrap();
+        let source_hash = manifest
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                FsTreeEntry::File { hash, .. } => Some(*hash),
+                _ => None,
+            })
+            .unwrap();
+        let source_file = fs_tree.fs_file_path(source_hash).unwrap();
+        let build_dir = temp.path().join("build");
+        fs::create_dir(&build_dir).unwrap();
+        let mut cx = BuildContext::with_noop_logger(build_dir, fs_tree);
+        let builder = crate::BUILDERS
+            .iter()
+            .copied()
+            .find(|builder| builder.tag() == "FsTreeExport")
+            .unwrap();
+        assert_eq!(builder.impl_version(), "2");
+        let plan = builder
+            .plan(serde_json::json!({"copies": [{"from": "usr", "to": "export"}]}))
+            .unwrap();
+        let output = plan
+            .build(
+                BuilderInputs::new(BTreeMap::from([("input".into(), manifest_path)])),
+                &mut cx,
+            )
+            .unwrap();
+        assert_eq!(fs::read(output.join("export/bin/tool")).unwrap(), b"tool");
+        assert_eq!(
+            fs::read_link(output.join("export/bin/link")).unwrap(),
+            Path::new("tool")
+        );
+        assert_ne!(
+            fs::metadata(source_file).unwrap().ino(),
+            fs::metadata(output.join("export/bin/tool")).unwrap().ino()
+        );
+        let owner = fs::metadata(&output).unwrap();
+        for directory in ["", "export", "export/bin"] {
+            let metadata = fs::metadata(output.join(directory)).unwrap();
+            assert_eq!(metadata.mode() & 0o7777, 0o755);
+            assert_eq!((metadata.uid(), metadata.gid()), (owner.uid(), owner.gid()));
+        }
+        let metadata = fs::metadata(output.join("export/bin/tool")).unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o751);
+        assert_eq!((metadata.uid(), metadata.gid()), (owner.uid(), owner.gid()));
+        let link = fs::symlink_metadata(output.join("export/bin/link")).unwrap();
+        assert_eq!((link.uid(), link.gid()), (owner.uid(), owner.gid()));
+    }
+
+    #[test]
+    fn builder_propagates_typed_cancellation_without_staging_output() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("file"), b"file").unwrap();
+        let fs_tree = store_fs_tree(temp.path());
+        let manifest = temp.path().join("manifest");
+        fs_tree
+            .intern_tree(source)
+            .unwrap()
+            .write_canonical(&manifest)
+            .unwrap();
+        let build_dir = temp.path().join("build");
+        std::fs::create_dir(&build_dir).unwrap();
+        let mut cx = BuildContext::with_noop_logger(build_dir.clone(), fs_tree);
+        cx.cancellation_token().cancel();
+        let result = FsTreeExportBuilder.build_typed(
+            FsTreeExportConfig {
+                copies: vec![CopyCommand {
+                    from: "file".into(),
+                    to: "file".into(),
+                }],
+            },
+            BuilderInputs::new(std::collections::BTreeMap::from([(
+                "input".into(),
+                manifest,
+            )])),
+            &mut cx,
+        );
+        assert!(matches!(result, Err(BuilderError::Cancelled(_))));
+        assert_eq!(std::fs::read_dir(build_dir).unwrap().count(), 0);
     }
 
     #[test]

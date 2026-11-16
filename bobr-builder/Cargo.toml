@@ -29,3 +29,9 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "plain_tree_compose_namespace"
+path = "tests/plain_tree_compose_namespace.rs"
+harness = false
+required-features = ["integration-tests"]

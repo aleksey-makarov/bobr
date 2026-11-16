@@ -19,7 +19,7 @@ mod group;
 mod host_bundle;
 mod host_bundle_verify;
 mod oci_extract;
-mod plain_tree_copy;
+mod plain_tree_compose;
 mod registry;
 mod subject;
 #[cfg(test)]
@@ -51,11 +51,10 @@ pub use tree_subset::{TreeSubsetBuilder, TreeSubsetConfig};
 /// Return runtime functions supported by built-in builders.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
     vec![
-        bobr_runtime::runtime_ns::NsFunction::new(fs_tree_export::FsTreeExportFunction),
         bobr_runtime::runtime_ns::NsFunction::new(fs_tree_import::FsTreeImportFunction),
         bobr_runtime::runtime_ns::NsFunction::new(fs_tree_materialize::FsTreeMaterializeFunction),
         bobr_runtime::runtime_ns::NsFunction::new(oci_extract::OciExtractFunction),
-        bobr_runtime::runtime_ns::NsFunction::new(plain_tree_copy::PlainTreeCopyFunction),
+        bobr_runtime::runtime_ns::NsFunction::new(plain_tree_compose::PlainTreeComposeFunction),
     ]
 }
 
@@ -65,11 +64,10 @@ mod tests {
     fn runtime_function_registry_includes_fs_tree_import() {
         let functions = crate::runtime_functions();
 
-        assert_eq!(functions.len(), 5);
-        assert_eq!(functions[0].name(), "fs-tree-export");
-        assert_eq!(functions[1].name(), "fs-tree-import");
-        assert_eq!(functions[2].name(), "fs-tree-materialize");
-        assert_eq!(functions[3].name(), "oci-extract");
-        assert_eq!(functions[4].name(), "plain-tree-copy");
+        assert_eq!(functions.len(), 4);
+        assert_eq!(functions[0].name(), "fs-tree-import");
+        assert_eq!(functions[1].name(), "fs-tree-materialize");
+        assert_eq!(functions[2].name(), "oci-extract");
+        assert_eq!(functions[3].name(), "plain-tree-compose");
     }
 }

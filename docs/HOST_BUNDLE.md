@@ -318,9 +318,11 @@ when matching input trees already exist.
 
 The builder creates a new staging directory and recursively copies `_root`, the
 single launcher file, and optional overrides. It recreates symlinks without
-following them, visits directory entries deterministically, preserves the
-copied mode initially, and normalizes ownership to the owner of the output
-object. Sockets, devices, FIFOs, and other special files are rejected.
+following them, visits directory entries deterministically, preserves regular
+file modes initially (including executable bits), and normalizes ownership to
+the owner of the output object. Original directory modes are not preserved:
+every directory is created with canonical mode `0755`. Sockets, devices, FIFOs,
+and other special files are rejected.
 
 Regular files are copied into new inodes. The result has no hardlinks to
 materialized fs-trees, fs-files, launcher inputs, or overrides inputs. Hardlinks
@@ -349,8 +351,9 @@ never published as a successful result.
 
 After every generated file and verification pass is complete, the builder
 removes all write, setuid, and setgid bits from every non-symlink path. Read and
-execute bits are otherwise preserved. It walks the result again to verify this
-invariant before returning the ordinary directory object.
+execute bits of regular files are otherwise preserved; directories become
+`0555`. It walks the result again to verify this invariant before returning the
+ordinary directory object.
 
 Read-only modes prevent accidental writes by normal execution. They are not a
 security boundary against the owner of the object, who can deliberately change

@@ -1,8 +1,8 @@
 //! HostBundle declaration, filesystem composition, and runtime-config lowering.
 
 use crate::host_bundle_verify::{verify_startup_closure, verify_structure};
-use crate::plain_tree_copy::{PlainTreeCopy, PlainTreeCopyFunction, PlainTreeCopyInput};
-use crate::plain_tree_copy::{make_tree_read_only, verify_tree_read_only};
+use crate::plain_tree_compose::{PlainTreeComposeFunction, PlainTreeComposeInput, PlainTreeOp};
+use crate::plain_tree_compose::{make_tree_read_only, verify_tree_read_only};
 use crate::{BuildContext, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_bundle_launcher::{
     BundleConfig, BundleConfigError, EnvironmentOperation, EnvironmentRule,
@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 
 const PAYLOAD_ROOT: &str = "root";
@@ -63,7 +63,9 @@ impl TypedBuilder for HostBundleBuilder {
         // Bumped 3 -> 4: tools gained a typed fixed argument prefix whose
         // bundle-relative path entries are validated during composition and
         // resolved by the launcher before caller-provided arguments.
-        "4"
+        // Bumped 4 -> 5: shared plain-tree-compose creates all directories
+        // with canonical 0755 modes before read-only finalization.
+        "5"
     }
 
     fn build_typed(
@@ -89,18 +91,18 @@ fn build_host_bundle(
     let launcher_tree = inputs.required("_launcher")?.clone();
     let output_root = cx.temp_dir.join(OUTPUT_DIR_NAME);
 
-    let mut copies = vec![
-        PlainTreeCopy::Tree {
+    let mut ops = vec![
+        PlainTreeOp::CopyTree {
             source: root,
             dest: PAYLOAD_ROOT.to_string(),
         },
-        PlainTreeCopy::File {
+        PlainTreeOp::CopyFile {
             source: launcher_tree.join(INPUT_LAUNCHER_PATH),
             dest: OUTPUT_LAUNCHER_PATH.to_string(),
         },
     ];
     if let Some(overrides) = inputs.optional("overrides") {
-        copies.push(PlainTreeCopy::Tree {
+        ops.push(PlainTreeOp::CopyTree {
             source: overrides.clone(),
             dest: OVERRIDES_ROOT.to_string(),
         });
@@ -116,13 +118,15 @@ fn build_host_bundle(
     );
     cx.runtime()
         .run(
-            &PlainTreeCopyFunction,
-            PlainTreeCopyInput {
+            &PlainTreeComposeFunction,
+            PlainTreeComposeInput {
                 output_root: output_root.clone(),
-                copies,
+                ops,
+                cancellation_fifo: cx.cancellation_token().fifo_path().to_path_buf(),
             },
         )
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?
+        .into_builder_result()?;
 
     materialize_facade(&output_root, &runtime_config)?;
     let structure =
@@ -152,6 +156,15 @@ fn materialize_facade(
             wrapped_bin.display()
         ))
     })?;
+
+    for directory in [&public_bin, &wrapped_bin] {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).map_err(|error| {
+            BuilderError::ExecutionFailed(format!(
+                "failed to chmod '{}': {error}",
+                directory.display()
+            ))
+        })?;
+    }
 
     for (name, tool) in &runtime_config.tools {
         let wrapped = wrapped_bin.join(name);
@@ -937,6 +950,15 @@ mod tests {
         write_static_elf(&payload.join("usr/bin/demo"));
         write_static_elf(&launcher.join(INPUT_LAUNCHER_PATH));
         fs::write(overrides.join("registry"), b"override").unwrap();
+        // Neither payload nor overrides directory modes survive composition.
+        for directory in [
+            &payload,
+            &payload.join("usr"),
+            &payload.join("usr/bin"),
+            &overrides,
+        ] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o750)).unwrap();
+        }
 
         let mut slots = BTreeMap::new();
         slots.insert("_root".to_string(), payload.clone());
@@ -995,6 +1017,30 @@ mod tests {
         assert_eq!(runtime.tools["helper"].visibility, ToolVisibility::Internal);
         assert_eq!(
             fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        for directory in [
+            "",
+            "root",
+            "root/usr",
+            "root/usr/bin",
+            "root/usr/lib",
+            "overrides",
+            "bin",
+            "libexec",
+            WRAPPED_BIN,
+        ] {
+            assert_eq!(
+                fs::metadata(output.join(directory)).unwrap().mode() & 0o7777,
+                0o555,
+                "{directory}"
+            );
+        }
+        assert_eq!(
+            fs::metadata(output.join("root/usr/bin/demo"))
+                .unwrap()
+                .mode()
+                & 0o7777,
             0o555
         );
         verify_tree_read_only(&output).unwrap();
