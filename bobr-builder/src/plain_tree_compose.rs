@@ -1,13 +1,12 @@
 //! Execution of validated composition plans into independent plain objects.
 
+use bobr_core::CancellationReceiver;
 use bobr_runtime::runtime::{NoRuntimeEvent, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{
-    FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, lchown, symlink,
-};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, lchown, symlink};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]
@@ -15,12 +14,12 @@ pub(crate) struct PlainTreeComposeFunction;
 
 /// A builder-resolved plan. Sources are immutable inputs; destinations are
 /// checked again here, on the privileged side of the runtime boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PlainTreeComposeInput {
     pub(crate) output_root: PathBuf,
     pub(crate) ops: Vec<PlainTreeOp>,
-    pub(crate) cancellation_fifo: PathBuf,
+    pub(crate) cancellation: CancellationReceiver,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,30 +111,15 @@ impl Drop for StagedOutput {
 
 struct Composition {
     root: PathBuf,
-    cancellation: File,
+    cancellation: CancellationReceiver,
     uid: u32,
     gid: u32,
 }
 
 fn compose(input: PlainTreeComposeInput) -> ComposeResult<()> {
-    let cancellation = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&input.cancellation_fifo)?;
-    let metadata = cancellation.metadata()?;
-    if !metadata.file_type().is_fifo()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(
-            "plain-tree cancellation channel must be a private FIFO owned by the runtime user"
-                .to_string()
-                .into(),
-        );
-    }
     let cx = Composition {
         root: input.output_root,
-        cancellation,
+        cancellation: input.cancellation,
         uid: unsafe { libc::geteuid() },
         gid: unsafe { libc::getegid() },
     };
@@ -204,19 +188,10 @@ fn validate_destination(relative: &str) -> ComposeResult<()> {
 
 impl Composition {
     fn check_cancelled(&self) -> ComposeResult<()> {
-        let mut cancellation = &self.cancellation;
-        loop {
-            match cancellation.read(&mut [0_u8; 1]) {
-                Ok(0) => return Err(ComposeError::Cancelled),
-                Ok(_) => {
-                    return Err("plain-tree cancellation FIFO unexpectedly contained data"
-                        .to_string()
-                        .into());
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error.into()),
-            }
+        if self.cancellation.is_cancelled()? {
+            Err(ComposeError::Cancelled)
+        } else {
+            Ok(())
         }
     }
 
@@ -413,7 +388,7 @@ mod tests {
             PlainTreeComposeInput {
                 output_root: output.to_path_buf(),
                 ops,
-                cancellation_fifo: cancellation.fifo_path().to_path_buf(),
+                cancellation: cancellation.receiver().unwrap(),
             },
         )
     }
@@ -618,11 +593,7 @@ mod tests {
         let token = CancellationToken::new().unwrap();
         let cx = Composition {
             root: root.clone(),
-            cancellation: OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(token.fifo_path())
-                .unwrap(),
+            cancellation: token.receiver().unwrap(),
             uid: unsafe { libc::geteuid() },
             gid: unsafe { libc::getegid() },
         };
@@ -743,7 +714,7 @@ mod tests {
                 source,
                 dest: "root".into(),
             }],
-            cancellation_fifo: token.fifo_path().to_path_buf(),
+            cancellation: token.receiver().unwrap(),
         };
         let runtime_thread =
             thread::spawn(move || HostRuntime::new().run(&PlainTreeComposeFunction, input));
@@ -776,20 +747,26 @@ mod tests {
     }
 
     #[test]
-    fn already_cancelled_call_creates_no_output() {
+    fn already_cancelled_call_ignores_an_extra_writer_and_creates_no_output() {
         let temp = tempdir().unwrap();
-        let token = CancellationToken::new().unwrap();
+        let token = CancellationToken::new_in(temp.path()).unwrap();
+        let inherited_writer = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(temp.path().join("cancel"))
+            .unwrap();
         token.cancel();
         let output = temp.path().join("output");
         let result = PlainTreeComposeFunction
             .call(PlainTreeComposeInput {
                 output_root: output.clone(),
                 ops: vec![],
-                cancellation_fifo: token.fifo_path().to_path_buf(),
+                cancellation: token.receiver().unwrap(),
             })
             .unwrap();
         assert!(matches!(result, PlainTreeComposeOutput::Cancelled));
         assert!(!output.exists());
+        drop(inherited_writer);
     }
 
     #[test]

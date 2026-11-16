@@ -59,7 +59,7 @@ fn main() {
     let output = temp.path().join("output");
     let plan = json!({
         "output_root": output,
-        "cancellation_fifo": token.fifo_path(),
+        "cancellation": token.receiver().unwrap(),
         "ops": [{"kind": "copy-tree", "source": source, "dest": "root"}]
     });
 

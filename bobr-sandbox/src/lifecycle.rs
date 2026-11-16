@@ -1,10 +1,10 @@
 use crate::reports::{command_context, read_sandbox_failure_report, status_message};
+use bobr_core::CancellationReceiver;
 use bobr_runtime::runtime::{RuntimeError, RuntimeResult};
 use bobr_sandbox_launcher::{SandboxEvent, SandboxEventDecoder, write_handshake_byte};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
@@ -18,56 +18,6 @@ const PROCESS_POLL_INTERVAL_MS: i32 = 100;
 pub(crate) enum LauncherOutcome {
     Completed,
     Cancelled,
-}
-
-pub(crate) struct CancellationReceiver {
-    fifo: File,
-}
-
-impl CancellationReceiver {
-    pub(crate) fn open(path: &Path) -> Result<Self, RuntimeError> {
-        let fifo = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|error| {
-                RuntimeError::new(format!(
-                    "failed to open sandbox cancellation FIFO '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        let metadata = fifo.metadata().map_err(|error| {
-            RuntimeError::new(format!(
-                "failed to inspect sandbox cancellation FIFO '{}': {error}",
-                path.display()
-            ))
-        })?;
-        if !metadata.file_type().is_fifo() {
-            return Err(RuntimeError::new(format!(
-                "sandbox cancellation path is not a FIFO: '{}'",
-                path.display()
-            )));
-        }
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(RuntimeError::new(format!(
-                "sandbox cancellation FIFO '{}' is not owned by the runtime user",
-                path.display()
-            )));
-        }
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(RuntimeError::new(format!(
-                "sandbox cancellation FIFO '{}' is accessible by other users",
-                path.display()
-            )));
-        }
-        Ok(Self { fifo })
-    }
-
-    pub(crate) fn is_cancelled(&self) -> Result<bool, RuntimeError> {
-        cancellation_eof(self.fifo.as_raw_fd()).map_err(|error| {
-            RuntimeError::new(format!("failed to read sandbox cancellation FIFO: {error}"))
-        })
-    }
 }
 
 pub(crate) fn run_sandbox_launcher(
@@ -212,16 +162,13 @@ fn run_sandbox_launcher_command(
         })? {
             break status;
         }
-        if poll_launcher(
-            cancellation.fifo.as_raw_fd(),
-            stderr.as_raw_fd(),
-            event_reader.as_raw_fd(),
-        )
-        .map_err(|error| {
-            RuntimeError::new(format!(
-                "failed while waiting for sandbox launcher: {error}"
-            ))
-        })? {
+        if poll_launcher(cancellation, stderr.as_raw_fd(), event_reader.as_raw_fd()).map_err(
+            |error| {
+                RuntimeError::new(format!(
+                    "failed while waiting for sandbox launcher: {error}"
+                ))
+            },
+        )? {
             let _ = child.kill_and_reap();
             let _ = drain_stderr(&mut stderr, &mut stderr_bytes);
             let _ = drain_sandbox_events(&mut event_reader, &mut event_decoder, emit);
@@ -358,32 +305,14 @@ fn drain_sandbox_events(
     }
 }
 
-fn cancellation_eof(fd: RawFd) -> io::Result<bool> {
-    let mut byte = 0_u8;
-    let result = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
-    if result == 0 {
-        return Ok(true);
-    }
-    if result > 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "cancellation FIFO unexpectedly contained data",
-        ));
-    }
-    let error = io::Error::last_os_error();
-    if error.kind() == io::ErrorKind::WouldBlock {
-        Ok(false)
-    } else if error.kind() == io::ErrorKind::Interrupted {
-        cancellation_eof(fd)
-    } else {
-        Err(error)
-    }
-}
-
-fn poll_launcher(cancellation_fd: RawFd, stderr_fd: RawFd, event_fd: RawFd) -> io::Result<bool> {
+fn poll_launcher(
+    cancellation: &CancellationReceiver,
+    stderr_fd: RawFd,
+    event_fd: RawFd,
+) -> io::Result<bool> {
     let mut pollfds = [
         libc::pollfd {
-            fd: cancellation_fd,
+            fd: cancellation.as_fd().as_raw_fd(),
             events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
             revents: 0,
         },
@@ -412,7 +341,7 @@ fn poll_launcher(cancellation_fd: RawFd, stderr_fd: RawFd, event_fd: RawFd) -> i
         }
         return Err(error);
     }
-    Ok(pollfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0)
+    cancellation.is_cancelled()
 }
 
 fn duplicate_cloexec(fd: RawFd, minimum: RawFd) -> io::Result<OwnedFd> {
@@ -468,9 +397,10 @@ mod tests {
     use super::*;
     use bobr_core::CancellationToken;
     use std::ffi::CString;
+    use std::fs::OpenOptions;
     use std::mem::size_of;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::sync::Arc;
     use std::thread;
     use tempfile::tempdir;
@@ -563,38 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_receiver_rejects_regular_files_and_symlinks() {
-        let temp = tempdir().unwrap();
-        let regular = temp.path().join("regular");
-        std::fs::write(&regular, []).unwrap();
-        let symlink = temp.path().join("symlink");
-        std::os::unix::fs::symlink(&regular, &symlink).unwrap();
-
-        assert!(CancellationReceiver::open(&regular).is_err());
-        assert!(CancellationReceiver::open(&symlink).is_err());
-    }
-
-    #[test]
-    fn cancellation_receiver_rejects_public_fifo() {
-        let temp = tempdir().unwrap();
-        let fifo = temp.path().join("cancel");
-        make_fifo(&fifo);
-        std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o666)).unwrap();
-
-        assert!(CancellationReceiver::open(&fifo).is_err());
-    }
-
-    #[test]
-    fn cancellation_receiver_is_close_on_exec_and_observes_late_open() {
-        let token = CancellationToken::new().unwrap();
-        token.cancel();
-        let receiver = CancellationReceiver::open(token.fifo_path()).unwrap();
-
-        assert!(cloexec_is_set(receiver.fifo.as_raw_fd()));
-        assert!(receiver.is_cancelled().unwrap());
-    }
-
-    #[test]
     fn launcher_has_its_own_process_group_and_cancellation_reaps_it() {
         let temp = tempdir().unwrap();
         let launcher = temp.path().join("launcher.sh");
@@ -619,7 +517,7 @@ mod tests {
         let thread_failure = failure.clone();
         let thread_launcher_config = launcher_config.clone();
         let thread = thread::spawn(move || {
-            let receiver = CancellationReceiver::open(thread_token.fifo_path()).unwrap();
+            let receiver = thread_token.receiver().unwrap();
             let mut emit = |_| Ok(());
             run_sandbox_launcher_command(
                 test_launcher_command(&thread_launcher),
@@ -653,7 +551,7 @@ mod tests {
             "dd bs=1 count=1 <&3 >/dev/null 2>/dev/null\ndd if=/dev/zero bs=8192 count=128 1>&2 2>/dev/null\nexit 7",
         );
         let token = CancellationToken::new().unwrap();
-        let receiver = CancellationReceiver::open(token.fifo_path()).unwrap();
+        let receiver = token.receiver().unwrap();
         let mut emit = |_| Ok(());
         let error = run_sandbox_launcher_command(
             test_launcher_command(&launcher),
@@ -688,7 +586,7 @@ mod tests {
         bobr_sandbox_launcher::write_sandbox_event(&mut frame, &expected).unwrap();
         std::fs::write(launcher_config.join("events.bin"), frame).unwrap();
         let token = CancellationToken::new().unwrap();
-        let receiver = CancellationReceiver::open(token.fifo_path()).unwrap();
+        let receiver = token.receiver().unwrap();
         let mut events = Vec::new();
 
         let outcome = run_sandbox_launcher_command(

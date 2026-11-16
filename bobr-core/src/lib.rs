@@ -3,7 +3,7 @@
 //! Foundational types used across the builder, source, store, and execution
 //! crates: subject identity, object hashes and build keys, the build event
 //! logging subsystem, per-subject run context and workspace, the cancellation
-//! token, and OCI image-layout helpers (the [`oci`] module). The runtime backend
+//! channel, and OCI image-layout helpers (the [`oci`] module). The runtime backend
 //! selection ([`RuntimeProvider`]) is re-exported from `bobr-runtime`.
 
 #[cfg(not(target_os = "linux"))]

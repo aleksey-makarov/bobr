@@ -528,13 +528,16 @@ mod tests {
     // Returns the input plus the function-owned `workspace` that the runtime
     // function would create under `tmp`, so tests can drive the lower-level
     // helpers directly.
-    fn valid_input(temp: &tempfile::TempDir) -> (SandboxInput, PathBuf) {
+    fn valid_input(
+        temp: &tempfile::TempDir,
+    ) -> (SandboxInput, PathBuf, bobr_core::CancellationToken) {
         let rootfs = temp.path().join("rootfs");
         let config_dir = temp.path().join("config");
         let workspace = temp.path().join("workspace");
         for path in [&rootfs, &config_dir, &workspace] {
             fs::create_dir_all(path).unwrap();
         }
+        let token = bobr_core::CancellationToken::new().unwrap();
         let input = SandboxInput {
             rootfs,
             config_dir,
@@ -549,11 +552,9 @@ mod tests {
             steps: Vec::new(),
             build_seed_hex: String::new(),
             plain_object: false,
-            cancellation: crate::SandboxCancellationInput {
-                fifo: temp.path().join("cancel"),
-            },
+            cancellation: token.receiver().unwrap(),
         };
-        (input, workspace)
+        (input, workspace, token)
     }
 
     #[test]
@@ -562,7 +563,7 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("main.c"), "int main(void) { return 0; }\n").unwrap();
-        let (mut input, workspace) = valid_input(&temp);
+        let (mut input, workspace, _token) = valid_input(&temp);
         for name in ["dev", "etc", "proc", "run", "tmp", "usr", "var"] {
             fs::create_dir(input.rootfs.join(name)).unwrap();
         }
@@ -689,7 +690,7 @@ mod tests {
     #[test]
     fn runner_config_serializes_effective_env_and_umask() {
         let temp = tempdir().unwrap();
-        let (mut input, workspace) = valid_input(&temp);
+        let (mut input, workspace, _token) = valid_input(&temp);
         let mut step = runtime_step(&temp, "build");
         step.env_overrides
             .insert("SOURCE_DATE_EPOCH".to_string(), "123".to_string());

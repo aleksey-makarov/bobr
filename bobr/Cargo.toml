@@ -43,3 +43,9 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "cancellation_namespace"
+path = "tests/cancellation_namespace.rs"
+harness = false
+required-features = ["integration-tests"]

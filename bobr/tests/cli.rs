@@ -153,7 +153,7 @@ fn assert_signal_cancels_run(signal: libc::c_int) {
     });
     let workspace = tempdir().unwrap();
     let (logs, work) = make_run_dirs(workspace.path());
-    let control_dir = work.join(".control");
+    let fifo = work.join("cancel");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     let request_path = workspace.path().join("cancel.json");
@@ -191,7 +191,6 @@ fn assert_signal_cancels_run(signal: libc::c_int) {
         .unwrap();
     let pid = child.id();
     accepted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let fifo = control_dir.join("cancel");
     let fifo_metadata = fs::metadata(&fifo).unwrap();
     assert!(fifo_metadata.file_type().is_fifo());
     assert_eq!(fifo_metadata.permissions().mode() & 0o777, 0o600);
@@ -212,7 +211,7 @@ fn assert_signal_cancels_run(signal: libc::c_int) {
     assert_eq!(output.status.code(), Some(130), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[cancelled]"), "{output:?}");
-    assert!(!control_dir.exists(), "{control_dir:?} was not removed");
+    assert!(!fifo.exists(), "{fifo:?} was not removed");
     assert_eq!(
         fs::read_dir(&work).unwrap().count(),
         0,
@@ -277,10 +276,10 @@ fn cli_reads_request_from_stdin_when_path_is_omitted() {
         &tree_file_recipe("stdin-recipe", "stdin.txt", "hello stdin", false),
     );
     let request_bytes = fs::read(&request_path).unwrap();
-    let control_dir = store_root(workspace.path())
+    let fifo = store_root(workspace.path())
         .join("work")
         .join(TEST_RUN_ID)
-        .join(".control");
+        .join("cancel");
 
     let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .current_dir(workspace.path())
@@ -304,7 +303,7 @@ fn cli_reads_request_from_stdin_when_path_is_omitted() {
         "{stderr}"
     );
     assert!(stderr.contains("subject completed"), "{stderr}");
-    assert!(!control_dir.exists(), "{control_dir:?} was not removed");
+    assert!(!fifo.exists(), "{fifo:?} was not removed");
 }
 
 #[test]

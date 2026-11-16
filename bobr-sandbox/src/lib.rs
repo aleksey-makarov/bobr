@@ -13,7 +13,7 @@ mod reports;
 mod tools;
 
 use bobr_builder::{BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
-use bobr_core::BuildLogLevel;
+use bobr_core::{BuildLogLevel, CancellationReceiver};
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
 use bobr_sandbox_launcher::{
     CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
@@ -396,9 +396,10 @@ fn prepare_sandbox_input(
         steps: sandbox_steps,
         build_seed_hex: cx.build_seed().to_hex(),
         plain_object,
-        cancellation: SandboxCancellationInput {
-            fifo: cx.cancellation_token().fifo_path().to_path_buf(),
-        },
+        cancellation: cx
+            .cancellation_token()
+            .receiver()
+            .map_err(|error| SandboxError::FsFailed(error.to_string()))?,
     })
 }
 
@@ -1050,7 +1051,7 @@ pub struct SandboxInstallFunction;
 /// The function creates its own working directories (build workspace and output
 /// staging) under `tmp`, and guarantees that on return nothing owned by an
 /// in-namespace sub-uid is left in `tmp`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxInput {
     rootfs: PathBuf,
@@ -1068,14 +1069,7 @@ pub struct SandboxInput {
     /// captured as a standalone object; when clear, the overlay upper is
     /// captured as an additive fs-tree delta.
     plain_object: bool,
-    cancellation: SandboxCancellationInput,
-}
-
-/// Serializable receiver for the run-wide sandbox cancellation broadcast.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxCancellationInput {
-    fifo: PathBuf,
+    cancellation: CancellationReceiver,
 }
 
 /// A named extra input exposed inside the sandbox: a `name` and the host `path`
@@ -1154,8 +1148,7 @@ fn run_sandbox_function(
         )));
     }
 
-    let cancellation = lifecycle::CancellationReceiver::open(&input.cancellation.fifo)?;
-    if cancellation.is_cancelled()? {
+    if input.cancellation.is_cancelled()? {
         return Ok(SandboxFunctionOutput::Cancelled);
     }
 
@@ -1177,8 +1170,7 @@ fn run_sandbox_function(
         None
     };
 
-    let result =
-        run_sandbox_and_capture(&input, &workspace, out_dir.as_deref(), &cancellation, emit);
+    let result = run_sandbox_and_capture(&input, &workspace, out_dir.as_deref(), emit);
 
     // Guarantee no in-namespace-owned files remain in `tmp`. The workspace
     // (build tree) is always removed as ns-root. `$out` is the artifact on
@@ -1218,9 +1210,9 @@ fn run_sandbox_and_capture(
     input: &SandboxInput,
     workspace: &Path,
     out_dir: Option<&Path>,
-    cancellation: &lifecycle::CancellationReceiver,
     emit: &mut dyn FnMut(SandboxEvent) -> RuntimeResult<()>,
 ) -> Result<SandboxRunOutcome, RuntimeError> {
+    let cancellation = &input.cancellation;
     let prepared = mounts::PreparedSandbox::create(input, workspace, out_dir)?;
     match lifecycle::run_sandbox_launcher(
         &input.launcher_path,
@@ -1738,7 +1730,9 @@ mod tests {
 
         assert_eq!(input.rootfs, rootfs);
         assert_eq!(input.tmp, cx.temp_dir);
-        assert_eq!(input.cancellation.fifo, cx.cancellation_token().fifo_path());
+        assert!(!input.cancellation.is_cancelled().unwrap());
+        cx.cancellation_token().cancel();
+        assert!(input.cancellation.is_cancelled().unwrap());
         assert_eq!(input.steps.len(), 1);
         assert_eq!(
             input.steps[0].cwd,
@@ -1777,9 +1771,7 @@ mod tests {
             steps: Vec::new(),
             build_seed_hex: "00".repeat(32),
             plain_object: false,
-            cancellation: SandboxCancellationInput {
-                fifo: cancellation.fifo_path().to_path_buf(),
-            },
+            cancellation: cancellation.receiver().unwrap(),
         };
         let input: SandboxInput =
             serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
@@ -1831,9 +1823,7 @@ mod tests {
                 steps: Vec::new(),
                 build_seed_hex: "00".repeat(32),
                 plain_object,
-                cancellation: SandboxCancellationInput {
-                    fifo: cancellation.fifo_path().to_path_buf(),
-                },
+                cancellation: cancellation.receiver().unwrap(),
             };
             let thread =
                 thread::spawn(move || HostRuntime::new().run(&SandboxInstallFunction, input));

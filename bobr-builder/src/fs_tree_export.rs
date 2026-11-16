@@ -125,7 +125,10 @@ fn build_fs_tree_export(
             PlainTreeComposeInput {
                 output_root: output_root.clone(),
                 ops,
-                cancellation_fifo: cx.cancellation_token().fifo_path().to_path_buf(),
+                cancellation: cx
+                    .cancellation_token()
+                    .receiver()
+                    .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?,
             },
         )
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?
